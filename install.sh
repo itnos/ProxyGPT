@@ -12,7 +12,7 @@
 set -Eeuo pipefail
 
 DIR=/opt/proxygpt
-DOMAIN="" IP="" EMAIL="" SITES_ARG="" AGREE=0 UNINSTALL=0 CHECK=0
+DOMAIN="" IP="" EMAIL="" SITES_ARG="" AGREE=0 UNINSTALL=0 CHECK=0 RELAY=""
 DEFAULT_SITES="claude.ai claude.com anthropic.com claudeusercontent.com chatgpt.com openai.com oaistatic.com oaiusercontent.com"
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
@@ -30,6 +30,8 @@ ProxyGPT - SNI-прокси и свой DNS, чтобы claude.ai и chatgpt.com
   --ip 203.0.113.10          внешний IP сервера, если не определился сам
   --sites "a.com b.com"      какие сайты пускать (по умолчанию Claude и ChatGPT); иначе правьте /opt/proxygpt/sites.txt
   --dir /opt/proxygpt        куда ставить
+  --relay                    включить приёмник для цепочки «другой VPN -> этот сервер -> сайт» (см. README)
+  --no-relay                 выключить приёмник
   --check                    только проверить, что DNS и прокси работают
   --uninstall                удалить (сертификат остаётся)
 
@@ -46,6 +48,8 @@ while [ $# -gt 0 ]; do
     --dir)       DIR="${2:-}"; shift 2 ;;
     --agree-tos) AGREE=1; shift ;;
     --check)     CHECK=1; shift ;;
+    --relay)     RELAY=1; shift ;;
+    --no-relay)  RELAY=0; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h|--help)   usage; exit 0 ;;
     *)           usage; die "неизвестный параметр: $1" ;;
@@ -63,12 +67,36 @@ fi
 DOMAIN="${DOMAIN:-${PG_DOMAIN:-}}"
 IP="${IP:-${PG_IP:-}}"
 EMAIL="${EMAIL:-${PG_EMAIL:-}}"
+RELAY="${RELAY:-${PG_RELAY:-0}}"
 DOMAIN="$(printf '%s' "$DOMAIN" | tr 'A-Z' 'a-z')"
 
 read_sites() {
   mapfile -t SITES < <(sed 's/#.*//' "$DIR/sites.txt" | tr 'A-Z' 'a-z' | tr -s ' \t' '\n' | grep -v '^$' | sort -u)
   CHECK_SITE="${SITES[0]:-}"
   for d in chatgpt.com claude.ai; do printf '%s\n' "${SITES[@]}" | grep -qx "$d" && CHECK_SITE="$d"; done
+}
+
+# Проверка приёмника: временный клиент Xray (socks 127.0.0.1:10099) -> wss://DOMAIN/путь -> сайт из списка.
+check_relay() {
+  local cfg=/tmp/proxygpt-relay-test.json res ip
+  [ "$(docker inspect -f '{{.State.Running}}' proxygpt-relay 2>/dev/null)" = true ] && pass "контейнер proxygpt-relay работает" || { fail "контейнер proxygpt-relay не работает: docker logs proxygpt-relay"; return; }
+  cat > "$cfg" <<EOF
+{"log":{"loglevel":"error"},
+ "inbounds":[{"listen":"127.0.0.1","port":10099,"protocol":"socks","settings":{"udp":false}}],
+ "outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"$IP","port":443,"users":[{"id":"$PG_RELAY_UUID","encryption":"none"}]}]},
+   "streamSettings":{"network":"ws","security":"tls","tlsSettings":{"serverName":"$DOMAIN","alpn":["http/1.1"]},"wsSettings":{"path":"$PG_RELAY_PATH","host":"$DOMAIN"}}}]}
+EOF
+  chmod 644 "$cfg"
+  docker rm -f proxygpt-relay-test >/dev/null 2>&1 || true
+  docker run -d --rm --name proxygpt-relay-test --network host -v "$cfg:/c.json:ro" ghcr.io/xtls/xray-core:latest run -c /c.json >/dev/null 2>&1
+  sleep 2
+  res="$(curl -s --max-time 15 --socks5-hostname 127.0.0.1:10099 "https://$CHECK_SITE/cdn-cgi/trace" || true)"
+  ip="$(printf '%s\n' "$res" | sed -n 's/^ip=//p')"
+  [ "$ip" = "$IP" ] && pass "приёмник: $CHECK_SITE через wss://$DOMAIN выходит с адреса сервера" || fail "приёмник: $CHECK_SITE не открылся через wss://$DOMAIN (ip='${ip:-нет ответа}')"
+  res="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --socks5-hostname 127.0.0.1:10099 https://example.com/ || true)"
+  [ "$res" = 000 ] && pass "приёмник: сайты не из списка не пропускает" || fail "приёмник пропустил example.com (код $res)"
+  docker rm -f proxygpt-relay-test >/dev/null 2>&1 || true
+  rm -f "$cfg"
 }
 
 # Проверка: контейнеры, DoT, DoH, маршрут сайтов из списка и обычных сайтов, срок сертификата.
@@ -95,6 +123,7 @@ run_checks() {
   res="$(curl -s --max-time 15 --doh-url "https://$DOMAIN/dns-query" "https://$CHECK_SITE/cdn-cgi/trace" || true)"
   ip="$(printf '%s\n' "$res" | sed -n 's/^ip=//p')"; loc="$(printf '%s\n' "$res" | sed -n 's/^loc=//p')"
   [ "$ip" = "$IP" ] && pass "$CHECK_SITE видит адрес сервера: ip=$ip loc=$loc" || fail "$CHECK_SITE видит ip='${ip:-?}' (нужно $IP)"
+  if [ "${RELAY:-0}" = 1 ]; then check_relay; fi
   days="$(( ( $(date -d "$(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" | cut -d= -f2)" +%s) - $(date +%s) ) / 86400 ))"
   [ "$days" -gt 7 ] && pass "сертификат действует ещё $days дн. (продлевается сам)" || fail "сертификат истекает через $days дн.: certbot renew"
   [ "$ok" = 1 ] && say "Всё работает." || warn "Есть ошибки (см. выше)."
@@ -221,6 +250,10 @@ chmod +x /etc/letsencrypt/renewal-hooks/deploy/proxygpt.sh
 LOC="$(curl -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace | sed -n 's/^loc=//p' || true)"
 PG_UUID1="${PG_UUID1:-$(cat /proc/sys/kernel/random/uuid)}"
 PG_UUID2="${PG_UUID2:-$(cat /proc/sys/kernel/random/uuid)}"
+if [ "$RELAY" = 1 ]; then
+  PG_RELAY_UUID="${PG_RELAY_UUID:-$(cat /proc/sys/kernel/random/uuid)}"
+  PG_RELAY_PATH="${PG_RELAY_PATH:-/$(openssl rand -hex 12)}"
+fi
 cat > "$DIR/settings.env" <<EOF
 # ProxyGPT: настройки установки (их читает install.sh при повторном запуске)
 PG_DOMAIN=$DOMAIN
@@ -228,9 +261,13 @@ PG_IP=$IP
 PG_EMAIL=$EMAIL
 PG_UUID1=$PG_UUID1
 PG_UUID2=$PG_UUID2
+PG_RELAY=$RELAY
+PG_RELAY_UUID=${PG_RELAY_UUID:-}
+PG_RELAY_PATH=${PG_RELAY_PATH:-}
 EOF
+chmod 600 "$DIR/settings.env"
 
-fill() { sed -e "s|__DOMAIN__|$DOMAIN|g" -e "s|__IP__|$IP|g" -e "s|__LOC__|${LOC:-??}|g" -e "s|__SITE__|$CHECK_SITE|g" -e "s|__UUID1__|$PG_UUID1|g" -e "s|__UUID2__|$PG_UUID2|g"; }
+fill() { sed -e "s|__DOMAIN__|$DOMAIN|g" -e "s|__IP__|$IP|g" -e "s|__LOC__|${LOC:-??}|g" -e "s|__SITE__|$CHECK_SITE|g" -e "s|__UUID1__|$PG_UUID1|g" -e "s|__UUID2__|$PG_UUID2|g" -e "s|__RELAY_UUID__|${PG_RELAY_UUID:-}|g" -e "s|__RELAY_PATH__|${PG_RELAY_PATH:-}|g"; }
 
 # nginx: SNI-прокси на 443 (без расшифровки) + страница и DoH для имени DNS-сервера
 {
@@ -293,6 +330,7 @@ http {
         }
         location = /apple.mobileconfig { default_type application/x-apple-aspen-config; }
         location = /windows.ps1        { default_type text/plain; }
+        include /etc/nginx/proxygpt/relay-location*.conf;   # приёмник (--relay), если включён
     }
 }
 EOF
@@ -333,6 +371,55 @@ https://.:8444 {
 }
 EOF
 
+# Приёмник (--relay): VLESS через WebSocket за nginx на пути __RELAY_PATH__ того же имени DNS-сервера.
+# Для промежуточного VPN это обычное HTTPS к имени DNS-сервера. Выпускает только сайты из sites.txt.
+if [ "$RELAY" = 1 ]; then
+  cat <<'EOF' | fill > "$DIR/conf/relay-location.conf"
+location = __RELAY_PATH__ {
+    if ($http_upgrade != "websocket") { return 404; }
+    proxy_pass http://127.0.0.1:10086;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_buffering off;
+    proxy_read_timeout 1h;
+    proxy_send_timeout 1h;
+}
+EOF
+  RELAY_DOMAINS="$(printf '"domain:%s",' "${SITES[@]}")"; RELAY_DOMAINS="[${RELAY_DOMAINS%,}]"
+  cat <<EOF | fill > "$DIR/conf/xray.json"
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [{
+    "listen": "127.0.0.1", "port": 10086, "protocol": "vless",
+    "settings": {"clients": [{"id": "__RELAY_UUID__"}], "decryption": "none"},
+    "streamSettings": {"network": "ws", "wsSettings": {"path": "__RELAY_PATH__"}},
+    "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true}
+  }],
+  "outbounds": [
+    {"tag": "direct", "protocol": "freedom", "settings": {"domainStrategy": "UseIPv4"}},
+    {"tag": "block", "protocol": "blackhole"}
+  ],
+  "routing": {"domainStrategy": "AsIs", "rules": [
+    {"type": "field", "domain": $RELAY_DOMAINS, "outboundTag": "direct"},
+    {"type": "field", "network": "tcp,udp", "outboundTag": "block"}
+  ]}
+}
+EOF
+  chmod 644 "$DIR/conf/xray.json"
+  {
+    echo "# ProxyGPT, приёмник: ссылка для клиентов Xray (Happ, v2RayTun, Streisand). Это секрет: с ней ходят через ваш сервер."
+    echo "vless://${PG_RELAY_UUID}@${IP}:443?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome&alpn=http%2F1.1&type=ws&host=${DOMAIN}&path=$(printf '%s' "$PG_RELAY_PATH" | sed 's|/|%2F|g')#ProxyGPT-${DOMAIN}"
+    echo
+    echo "# Выход Xray для цепочки через другой VPN: dialerProxy - тег сервера этого VPN в его профиле."
+    printf '{"tag":"proxygpt","protocol":"vless","settings":{"vnext":[{"address":"%s","port":443,"users":[{"id":"%s","encryption":"none"}]}]},"streamSettings":{"network":"ws","security":"tls","tlsSettings":{"serverName":"%s","fingerprint":"chrome","alpn":["http/1.1"]},"wsSettings":{"path":"%s","host":"%s"},"sockopt":{"dialerProxy":"<тег сервера VPN>"}}}\n' "$IP" "$PG_RELAY_UUID" "$DOMAIN" "$PG_RELAY_PATH" "$DOMAIN"
+  } > "$DIR/relay.txt"
+  chmod 600 "$DIR/relay.txt"
+else
+  rm -f "$DIR/conf/relay-location.conf" "$DIR/conf/xray.json" "$DIR/relay.txt"
+fi
+
 cat > "$DIR/compose.yml" <<'EOF'
 # Сгенерировано install.sh.
 services:
@@ -360,6 +447,20 @@ services:
     command: ["-conf", "/etc/coredns/Corefile"]
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
 EOF
+if [ "$RELAY" = 1 ]; then
+  cat >> "$DIR/compose.yml" <<'EOF'
+
+  relay:
+    image: ghcr.io/xtls/xray-core:latest
+    container_name: proxygpt-relay
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./conf:/etc/proxygpt:ro
+    command: ["run", "-c", "/etc/proxygpt/xray.json"]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+EOF
+fi
 
 # ---------- файлы для устройств ----------
 
@@ -540,4 +641,5 @@ $( [ $ok = 1 ] && printf '\033[1;32mГотово.\033[0m' || printf '\033[1;33m�
 Журнал прокси: docker logs -f proxygpt-nginx
 Проверка на устройстве: https://$DOMAIN/ (раздел «Проверка»)
 Проверка на сервере: та же команда установки с параметром --check
+$( [ "$RELAY" = 1 ] && printf 'Приёмник для цепочки через другой VPN: включён, данные для клиента - %s/relay.txt (секрет)' "$DIR" )
 EOF
