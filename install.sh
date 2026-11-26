@@ -2,9 +2,9 @@
 # ProxyGPT: настоящий claude.ai и chatgpt.com через ваш сервер - SNI-прокси + свой DNS (DoH и DoT).
 #
 # Установка и обновление одной командой (Debian или Ubuntu, от root):
-#   curl -fsSL https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bash -s -- --domain dns.example.com --agree-tos
+#   curl -fsSL https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bash -s -- --domain dns.example.com --agree-tos --relay
 # Без curl:
-#   wget -qO- https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bash -s -- --domain dns.example.com --agree-tos
+#   wget -qO- https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bash -s -- --domain dns.example.com --agree-tos --relay
 # Проверка:
 #   ... | bash -s -- --check
 #

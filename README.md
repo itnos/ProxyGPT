@@ -35,16 +35,18 @@
 На сервере, от root:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bash -s -- --domain dns.example.com --agree-tos
+curl -fsSL https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bash -s -- --domain dns.example.com --agree-tos --relay
 ```
 
 Если на сервере нет `curl`, то же самое через `wget`:
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bash -s -- --domain dns.example.com --agree-tos
+wget -qO- https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bash -s -- --domain dns.example.com --agree-tos --relay
 ```
 
 Вместо `dns.example.com` укажите своё имя. В нём можно использовать буквы, цифры и дефис, а **подчёркивание нельзя**: Let's Encrypt не выпускает сертификаты на такие имена. `--agree-tos` - согласие с [условиями Let's Encrypt](https://letsencrypt.org/repository/): скрипт выпускает бесплатный сертификат для DNS-сервера.
+
+`--relay` сразу ставит **приёмник** - он нужен, чтобы Claude и ChatGPT шли через ваш сервер и тогда, когда на телефоне включён другой VPN (см. [Если на устройстве включён VPN](#если-на-устройстве-включён-vpn)). Заранее не знаешь, понадобится ли, а места и сил он почти не требует, поэтому он включён в команду. Не нужен - уберите `--relay` (или выключите потом командой с `--no-relay`); понадобится позже - запустите ту же команду с `--relay`, переустанавливать ничего не придётся.
 
 Скрипт сам:
 - поставит Docker, Docker Compose и certbot, если их нет;
@@ -68,7 +70,7 @@ ssh root@<IP сервера> cat /opt/proxygpt/links.txt
 | `--email you@example.com` | почта для писем Let's Encrypt (по умолчанию без почты) |
 | `--sites "claude.ai anthropic.com"` | свой список сайтов вместо стандартного |
 | `--ip 203.0.113.10` | внешний IP, если сервер за NAT и IP не определился сам |
-| `--relay` | включить приёмник для работы через другой VPN (см. [Если на устройстве включён VPN](#если-на-устройстве-включён-vpn)); `--no-relay` - выключить |
+| `--relay` | приёмник для работы через другой VPN (уже в команде выше); `--no-relay` - выключить |
 | `--check` | только проверить, что всё работает (см. ниже) |
 | `--uninstall` | удалить всё, кроме сертификата |
 
@@ -135,9 +137,9 @@ sudo mkdir -p /etc/systemd/resolved.conf.d && printf '[Resolve]\nDNS=203.0.113.1
 
 Для этого нужен VPN-сервис с подпиской в формате Xray JSON и приложение **Happ** (на iPhone, Android, Mac). Подписки для Happ отдают многие сервисы на Xray (VLESS, Reality).
 
-### 1. Включить приёмник на сервере
+### 1. Приёмник на сервере
 
-Та же команда установки с `--relay`:
+Если ставили командой из раздела [Установка](#установка-одна-команда), приёмник **уже включён** - переходите к шагу 2. Если ставили без `--relay`, включите его той же командой, переустанавливать ничего не нужно:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bash -s -- --relay
