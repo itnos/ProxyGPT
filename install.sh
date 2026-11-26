@@ -183,8 +183,10 @@ show_status() {
   else echo "  прокси сайтов:  выключен - DNS отдаёт настоящие адреса, сайты идут напрямую (включить: --start proxy)"; fi
 }
 dns_warning() {
-  warn "На устройствах с профилем DNS (iPhone, Mac, Android, Windows) пропадёт интернет, пока DNS не запустят"
-  warn "снова (--start) или пока на устройстве не выключат профиль DNS. Только Claude/ChatGPT убрать - это --stop proxy."
+  warn "Android и Windows с вашим DNS потеряют интернет, пока DNS не запустят снова (--start)."
+  warn "iPhone и Mac перейдут на DNS сети: Claude/ChatGPT пойдут напрямую. После --start их надо переподключить"
+  warn "к сети (авиарежим или Wi-Fi выкл/вкл), иначе они ещё какое-то время останутся на DNS сети."
+  warn "Только Claude/ChatGPT убрать, не трогая DNS, - это --stop proxy."
 }
 
 if [ "$STATUS" = 1 ]; then
@@ -204,11 +206,13 @@ if [ -n "$STOP$START" ]; then
       else PROXY=1; say "Включаю прокси: сайты из sites.txt снова пойдут через сервер"; fi ;;
     all)
       if [ "$act" = stop ]; then dns_warning; say "Останавливаю всё"; compose stop
-      else say "Запускаю всё"; compose up -d; fi
+      else say "Запускаю всё"; compose up -d
+        say "iPhone и Mac: переподключите к сети (авиарежим или Wi-Fi выкл/вкл), чтобы они вернулись на этот DNS"; fi
       show_status; exit 0 ;;
     dns)
       [ "$act" = stop ] && dns_warning
       say "$([ "$act" = stop ] && echo Останавливаю || echo Запускаю) DNS"; docker "$act" proxygpt-dns >/dev/null
+      [ "$act" = start ] && say "iPhone и Mac: переподключите к сети (авиарежим или Wi-Fi выкл/вкл), чтобы они вернулись на этот DNS"
       show_status; exit 0 ;;
     relay)
       [ "$RELAY" = 1 ] || die "приёмник не установлен: запустите установку с --relay"
