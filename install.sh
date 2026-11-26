@@ -13,7 +13,7 @@ set -Eeuo pipefail
 
 DIR=/opt/proxygpt
 RAW="${PROXYGPT_RAW:-https://raw.githubusercontent.com/itnos/ProxyGPT/main}"
-DOMAIN="" IP="" EMAIL="" SITES_ARG="" AGREE=0 UNINSTALL=0 CHECK=0 RELAY=""
+DOMAIN="" IP="" EMAIL="" SITES_ARG="" AGREE=0 UNINSTALL=0 CHECK=0 RELAY="" STOP="" START="" STATUS=0 PROXY=""
 DEFAULT_SITES="claude.ai claude.com anthropic.com claudeusercontent.com chatgpt.com openai.com oaistatic.com oaiusercontent.com"
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
@@ -34,6 +34,9 @@ ProxyGPT - SNI-прокси и свой DNS, чтобы claude.ai и chatgpt.com
   --relay                    включить приёмник для цепочки «другой VPN -> этот сервер -> сайт» (см. README)
   --no-relay                 выключить приёмник
   --check                    только проверить, что DNS и прокси работают
+  --status                   что запущено, что остановлено
+  --stop  [all|dns|proxy|relay]   остановить: всё (по умолчанию), DNS, прокси сайтов или приёмник
+  --start [all|dns|proxy|relay]   запустить то же обратно
   --uninstall                удалить (сертификат остаётся)
 
 Повторный запуск без параметров применяет правки sites.txt и обновляет образы.
@@ -49,6 +52,12 @@ while [ $# -gt 0 ]; do
     --dir)       DIR="${2:-}"; shift 2 ;;
     --agree-tos) AGREE=1; shift ;;
     --check)     CHECK=1; shift ;;
+    --status)    STATUS=1; shift ;;
+    --stop|--start)
+      act="${1#--}" what=all
+      case "${2:-}" in all|dns|proxy|relay) what="$2"; shift ;; esac
+      shift
+      if [ "$act" = stop ]; then STOP="$what"; else START="$what"; fi ;;
     --relay)     RELAY=1; shift ;;
     --no-relay)  RELAY=0; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
@@ -69,6 +78,7 @@ DOMAIN="${DOMAIN:-${PG_DOMAIN:-}}"
 IP="${IP:-${PG_IP:-}}"
 EMAIL="${EMAIL:-${PG_EMAIL:-}}"
 RELAY="${RELAY:-${PG_RELAY:-0}}"
+PROXY="${PROXY:-${PG_PROXY:-1}}"   # 1 - сайты из списка идут через сервер, 0 - прокси выключен (--stop proxy)
 DOMAIN="$(printf '%s' "$DOMAIN" | tr 'A-Z' 'a-z')"
 
 read_sites() {
@@ -121,13 +131,23 @@ run_checks() {
   for d in "${SITES[@]}"; do
     res="$(curl -sv -o /dev/null --connect-timeout 5 --max-time 10 --doh-url "https://$DOMAIN/dns-query" "https://$d:853/" 2>&1 \
       | sed -nE 's/^\* +IPv4: ([0-9.]+).*/\1/p; s/^\* +Trying ([0-9.]+):.*/\1/p' | head -1 || true)"
-    [ "$res" = "$IP" ] && pass "DNS: $d -> $IP (через сервер)" || fail "DNS: $d -> '${res:-нет ответа}', ожидался $IP"
+    if [ "$PROXY" = 1 ]; then
+      [ "$res" = "$IP" ] && pass "DNS: $d -> $IP (через сервер)" || fail "DNS: $d -> '${res:-нет ответа}', ожидался $IP"
+    else
+      if [ "$res" = "$IP" ]; then fail "DNS: $d -> $IP, а прокси выключен (ждали настоящий адрес)"
+      elif [ -n "$res" ]; then pass "DNS: $d -> $res (прокси выключен, напрямую)"
+      else pass "DNS: $d - у корневого имени нет адреса, это нормально (прокси выключен)"; fi
+    fi
   done
   res="$(curl -s -o /dev/null -w '%{remote_ip}' --max-time 15 --doh-url "https://$DOMAIN/dns-query" https://example.com/ || true)"
   [ -n "$res" ] && [ "$res" != "$IP" ] && pass "DNS: example.com -> $res (напрямую, как и должно)" || fail "DNS: example.com -> '${res:-нет ответа}'"
-  res="$(curl -s --max-time 15 --doh-url "https://$DOMAIN/dns-query" "https://$CHECK_SITE/cdn-cgi/trace" || true)"
-  ip="$(printf '%s\n' "$res" | sed -n 's/^ip=//p')"; loc="$(printf '%s\n' "$res" | sed -n 's/^loc=//p')"
-  [ "$ip" = "$IP" ] && pass "$CHECK_SITE видит адрес сервера: ip=$ip loc=$loc" || fail "$CHECK_SITE видит ip='${ip:-?}' (нужно $IP)"
+  if [ "$PROXY" = 1 ]; then
+    res="$(curl -s --max-time 15 --doh-url "https://$DOMAIN/dns-query" "https://$CHECK_SITE/cdn-cgi/trace" || true)"
+    ip="$(printf '%s\n' "$res" | sed -n 's/^ip=//p')"; loc="$(printf '%s\n' "$res" | sed -n 's/^loc=//p')"
+    [ "$ip" = "$IP" ] && pass "$CHECK_SITE видит адрес сервера: ip=$ip loc=$loc" || fail "$CHECK_SITE видит ip='${ip:-?}' (нужно $IP)"
+  else
+    printf '  - прокси сайтов выключен (--stop proxy), включить: --start proxy\n'
+  fi
   res="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://$DOMAIN/$PG_PAGE_TOKEN/" || true)"
   [ "$res" = 200 ] && pass "страница устройств открывается по секретному адресу (адрес - в links.txt)" || fail "страница устройств: код $res"
   res="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://$DOMAIN/" || true)"
@@ -148,6 +168,54 @@ find_compose() {
   elif command -v docker-compose >/dev/null 2>&1; then COMPOSE="docker-compose"
   else return 1; fi
 }
+
+show_status() {
+  local item n d st
+  say "ProxyGPT: $DOMAIN ($IP)"
+  for item in "proxygpt-nginx|прокси сайтов, страницы, DoH на 443" "proxygpt-dns|DNS: DoT 853 и DoH" \
+              "proxygpt-relay|приёмник (работа через другой VPN)" "proxygpt-sub|страница и подписка Happ"; do
+    n="${item%%|*}" d="${item#*|}"
+    st="$(docker inspect -f '{{.State.Status}}' "$n" 2>/dev/null || echo 'не установлен')"
+    case "$st" in running) st="✓ работает " ;; exited|created) st="■ ОСТАНОВЛЕН" ;; "не установлен") st="- нет      " ;; esac
+    printf '  %s  %-15s %s\n' "$st" "$n" "$d"
+  done
+  if [ "$PROXY" = 1 ]; then echo "  прокси сайтов:  включён - сайты из sites.txt идут через сервер"
+  else echo "  прокси сайтов:  выключен - DNS отдаёт настоящие адреса, сайты идут напрямую (включить: --start proxy)"; fi
+}
+dns_warning() {
+  warn "На устройствах с профилем DNS (iPhone, Mac, Android, Windows) пропадёт интернет, пока DNS не запустят"
+  warn "снова (--start) или пока на устройстве не выключат профиль DNS. Только Claude/ChatGPT убрать - это --stop proxy."
+}
+
+if [ "$STATUS" = 1 ]; then
+  [ -f "$DIR/settings.env" ] || die "ProxyGPT в $DIR не установлен"
+  show_status
+  exit 0
+fi
+
+if [ -n "$STOP$START" ]; then
+  [ -f "$DIR/compose.yml" ] || die "ProxyGPT в $DIR не установлен"
+  find_compose || die "нет Docker Compose"
+  if [ -n "$STOP" ]; then act=stop what="$STOP"; else act=start what="$START"; fi
+  case "$what" in
+    proxy)
+      # прокси - это режим, а не контейнер: пересобираем настройки (ниже, обычной установкой) и перезапускаем
+      if [ "$act" = stop ]; then PROXY=0; say "Выключаю прокси: DNS будет отдавать настоящие адреса сайтов, сервер перестанет их пересылать"
+      else PROXY=1; say "Включаю прокси: сайты из sites.txt снова пойдут через сервер"; fi ;;
+    all)
+      if [ "$act" = stop ]; then dns_warning; say "Останавливаю всё"; compose stop
+      else say "Запускаю всё"; compose up -d; fi
+      show_status; exit 0 ;;
+    dns)
+      [ "$act" = stop ] && dns_warning
+      say "$([ "$act" = stop ] && echo Останавливаю || echo Запускаю) DNS"; docker "$act" proxygpt-dns >/dev/null
+      show_status; exit 0 ;;
+    relay)
+      [ "$RELAY" = 1 ] || die "приёмник не установлен: запустите установку с --relay"
+      say "$([ "$act" = stop ] && echo Останавливаю || echo Запускаю) приёмник и подписку Happ"; docker "$act" proxygpt-relay proxygpt-sub >/dev/null
+      show_status; exit 0 ;;
+  esac
+fi
 
 if [ "$CHECK" = 1 ]; then
   [ -f "$DIR/settings.env" ] && [ -f "$DIR/sites.txt" ] || die "ProxyGPT в $DIR не установлен"
@@ -277,6 +345,7 @@ PG_RELAY_UUID=${PG_RELAY_UUID:-}
 PG_RELAY_PATH=${PG_RELAY_PATH:-}
 PG_SUB_TOKEN=${PG_SUB_TOKEN:-}
 PG_PAGE_TOKEN=$PG_PAGE_TOKEN
+PG_PROXY=$PROXY
 EOF
 chmod 600 "$DIR/settings.env"
 
@@ -309,9 +378,13 @@ stream {
     map $ssl_preread_server_name $up {
 EOF
   printf '        %-46s %s\n' "__DOMAIN__" "127.0.0.1:8445;"
-  for d in "${SITES[@]}"; do
-    printf '        %-46s %s\n' "~^([a-z0-9-]+\\.)*$(printf '%s' "$d" | sed 's/\./\\./g')\$" '$ssl_preread_server_name:443;'
-  done
+  if [ "$PROXY" = 1 ]; then
+    for d in "${SITES[@]}"; do
+      printf '        %-46s %s\n' "~^([a-z0-9-]+\\.)*$(printf '%s' "$d" | sed 's/\./\\./g')\$" '$ssl_preread_server_name:443;'
+    done
+  else
+    echo "        # прокси выключен (--stop proxy): сайты не пересылаются"
+  fi
   cat <<'EOF'
         default                                        127.0.0.1:9;
     }
@@ -365,18 +438,23 @@ EOF
 # CoreDNS: сайты из списка -> IP сервера, у них же пустые AAAA и HTTPS (иначе устройство уйдёт напрямую),
 # остальное - обычный ответ через Cloudflare DNS по TLS.
 ZONES="${SITES[*]}"
-cat <<EOF | fill > "$DIR/conf/Corefile"
-# Сгенерировано install.sh. Правки - в sites.txt, затем запустить установку ещё раз.
-(sites) {
-    template IN A $ZONES {
-        answer "{{ .Name }} 60 IN A __IP__"
+if [ "$PROXY" = 1 ]; then
+  TEMPLATES="    template IN A $ZONES {
+        answer \"{{ .Name }} 60 IN A __IP__\"
     }
     template IN AAAA $ZONES {
         rcode NOERROR
     }
     template IN HTTPS $ZONES {
         rcode NOERROR
-    }
+    }"
+else
+  TEMPLATES="    # прокси выключен (--stop proxy): все адреса - настоящие"
+fi
+cat <<EOF | fill > "$DIR/conf/Corefile"
+# Сгенерировано install.sh. Правки - в sites.txt, затем запустить установку ещё раз.
+(sites) {
+$TEMPLATES
     forward . tls://1.1.1.1 tls://1.0.0.1 {
         tls_servername cloudflare-dns.com
         health_check 30s
@@ -706,11 +784,12 @@ $( [ $ok = 1 ] && printf '\033[1;32mГотово.\033[0m' || printf '\033[1;33m�
   Android:            Частный DNS -> $DOMAIN
   Windows 11:         irm https://$DOMAIN/$PG_PAGE_TOKEN/windows.ps1 | iex   (PowerShell от администратора)
 
-Сайты: ${SITES[*]}
+Сайты: ${SITES[*]}$( [ "$PROXY" = 1 ] || printf '  (прокси ВЫКЛЮЧЕН - идут напрямую; включить: --start proxy)' )
 Правка списка: $DIR/sites.txt, затем запустить установку ещё раз.
 Журнал прокси: docker logs -f proxygpt-nginx
 Проверка на устройстве: раздел «Проверка» на странице настройки
 Проверка на сервере: та же команда установки с параметром --check
+Остановка и запуск: --status, --stop [all|dns|proxy|relay], --start [...] (подробно - README)
 EOF
 
 if [ "$RELAY" = 1 ]; then
