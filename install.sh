@@ -363,7 +363,8 @@ EOF
 
 # ---------- файлы для устройств ----------
 
-# iPhone, iPad, Mac: профиль DNS (DoH)
+# iPhone, iPad, Mac: профиль DNS (DoH). PayloadScope=System обязателен для macOS 26: без него
+# установка падает с ошибкой «Не удалось создать службу VPN».
 cat <<'EOF' | fill > "$DIR/www/apple.mobileconfig"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -403,6 +404,8 @@ cat <<'EOF' | fill > "$DIR/www/apple.mobileconfig"
     <string>proxygpt.dns.__UUID2__</string>
     <key>PayloadRemovalDisallowed</key>
     <false/>
+    <key>PayloadScope</key>
+    <string>System</string>
     <key>PayloadType</key>
     <string>Configuration</string>
     <key>PayloadUUID</key>
