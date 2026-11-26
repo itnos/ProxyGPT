@@ -632,6 +632,9 @@ cat <<'EOF' | fill > "$DIR/www/apple.mobileconfig"
                 <array>
                     <string>__IP__</string>
                 </array>
+                <!-- не уходить на DNS сети, если этот сервер недоступен: Claude не пойдёт напрямую (iOS/macOS 26+) -->
+                <key>AllowFailover</key>
+                <false/>
             </dict>
             <key>PayloadDescription</key>
             <string>DNS __DOMAIN__: claude.ai, chatgpt.com and other listed sites go through your server</string>
