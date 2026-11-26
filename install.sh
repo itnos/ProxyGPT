@@ -12,6 +12,7 @@
 set -Eeuo pipefail
 
 DIR=/opt/proxygpt
+RAW="${PROXYGPT_RAW:-https://raw.githubusercontent.com/itnos/ProxyGPT/main}"
 DOMAIN="" IP="" EMAIL="" SITES_ARG="" AGREE=0 UNINSTALL=0 CHECK=0 RELAY=""
 DEFAULT_SITES="claude.ai claude.com anthropic.com claudeusercontent.com chatgpt.com openai.com oaistatic.com oaiusercontent.com"
 
@@ -97,6 +98,10 @@ EOF
   [ "$res" = 000 ] && pass "приёмник: сайты не из списка не пропускает" || fail "приёмник пропустил example.com (код $res)"
   docker rm -f proxygpt-relay-test >/dev/null 2>&1 || true
   rm -f "$cfg"
+  res="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://$DOMAIN/happ/$PG_SUB_TOKEN/" || true)"
+  [ "$res" = 200 ] && pass "страница подписки Happ отвечает (адрес - в relay.txt)" || fail "страница подписки Happ: код $res (docker logs proxygpt-sub)"
+  res="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://$DOMAIN/happ/0000000000000000/" || true)"
+  [ "$res" = 404 ] && pass "без секретного адреса страница подписки закрыта" || fail "страница подписки открылась без секрета (код $res)"
 }
 
 # Проверка: контейнеры, DoT, DoH, маршрут сайтов из списка и обычных сайтов, срок сертификата.
@@ -253,6 +258,7 @@ PG_UUID2="${PG_UUID2:-$(cat /proc/sys/kernel/random/uuid)}"
 if [ "$RELAY" = 1 ]; then
   PG_RELAY_UUID="${PG_RELAY_UUID:-$(cat /proc/sys/kernel/random/uuid)}"
   PG_RELAY_PATH="${PG_RELAY_PATH:-/$(openssl rand -hex 12)}"
+  PG_SUB_TOKEN="${PG_SUB_TOKEN:-$(openssl rand -hex 16)}"
 fi
 cat > "$DIR/settings.env" <<EOF
 # ProxyGPT: настройки установки (их читает install.sh при повторном запуске)
@@ -264,10 +270,20 @@ PG_UUID2=$PG_UUID2
 PG_RELAY=$RELAY
 PG_RELAY_UUID=${PG_RELAY_UUID:-}
 PG_RELAY_PATH=${PG_RELAY_PATH:-}
+PG_SUB_TOKEN=${PG_SUB_TOKEN:-}
 EOF
 chmod 600 "$DIR/settings.env"
 
-fill() { sed -e "s|__DOMAIN__|$DOMAIN|g" -e "s|__IP__|$IP|g" -e "s|__LOC__|${LOC:-??}|g" -e "s|__SITE__|$CHECK_SITE|g" -e "s|__UUID1__|$PG_UUID1|g" -e "s|__UUID2__|$PG_UUID2|g" -e "s|__RELAY_UUID__|${PG_RELAY_UUID:-}|g" -e "s|__RELAY_PATH__|${PG_RELAY_PATH:-}|g"; }
+# пункты проверки для страницы: Claude и ChatGPT, если они в списке
+CHECK_ITEMS="" CHECK_CLI=""
+for d in claude.ai chatgpt.com; do
+  printf '%s\n' "${SITES[@]}" | grep -qx "$d" || continue
+  CHECK_ITEMS="$CHECK_ITEMS  <li><a href=\"https://$d/cdn-cgi/trace\">$d/cdn-cgi/trace</a> - должно быть <code>ip=__IP__</code> и <code>loc=__LOC__</code>: $d идёт через сервер.</li>"
+  [ "$d" = "$CHECK_SITE" ] || CHECK_CLI="${CHECK_CLI:+$CHECK_CLI }Для $d - то же самое с адресом $d."
+done
+[ -n "$CHECK_ITEMS" ] || CHECK_ITEMS="  <li><a href=\"https://__SITE__/cdn-cgi/trace\">__SITE__/cdn-cgi/trace</a> - должно быть <code>ip=__IP__</code>: сайт идёт через сервер.</li>"
+
+fill() { sed -e "s|__CHECK_ITEMS__|$CHECK_ITEMS|g" -e "s|__CHECK_CLI__|$CHECK_CLI|g" -e "s|__DOMAIN__|$DOMAIN|g" -e "s|__IP__|$IP|g" -e "s|__LOC__|${LOC:-??}|g" -e "s|__SITE__|$CHECK_SITE|g" -e "s|__UUID1__|$PG_UUID1|g" -e "s|__UUID2__|$PG_UUID2|g" -e "s|__RELAY_UUID__|${PG_RELAY_UUID:-}|g" -e "s|__RELAY_PATH__|${PG_RELAY_PATH:-}|g"; }
 
 # nginx: SNI-прокси на 443 (без расшифровки) + страница и DoH для имени DNS-сервера
 {
@@ -386,6 +402,13 @@ location = __RELAY_PATH__ {
     proxy_read_timeout 1h;
     proxy_send_timeout 1h;
 }
+
+# Страница и подписка Happ (сервис proxygpt-sub): /happ/<секрет>/
+location ^~ /happ/ {
+    proxy_pass http://127.0.0.1:8446;
+    proxy_set_header Host $host;
+    proxy_read_timeout 60s;
+}
 EOF
   RELAY_DOMAINS="$(printf '"domain:%s",' "${SITES[@]}")"; RELAY_DOMAINS="[${RELAY_DOMAINS%,}]"
   cat <<EOF | fill > "$DIR/conf/xray.json"
@@ -408,16 +431,29 @@ EOF
 }
 EOF
   chmod 644 "$DIR/conf/xray.json"
+  RELAY_LINK="vless://${PG_RELAY_UUID}@${IP}:443?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome&alpn=http%2F1.1&type=ws&host=${DOMAIN}&path=$(printf '%s' "$PG_RELAY_PATH" | sed 's|/|%2F|g')#ProxyGPT-${DOMAIN}"
   {
-    echo "# ProxyGPT, приёмник: ссылка для клиентов Xray (Happ, v2RayTun, Streisand). Это секрет: с ней ходят через ваш сервер."
-    echo "vless://${PG_RELAY_UUID}@${IP}:443?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome&alpn=http%2F1.1&type=ws&host=${DOMAIN}&path=$(printf '%s' "$PG_RELAY_PATH" | sed 's|/|%2F|g')#ProxyGPT-${DOMAIN}"
+    echo "# ProxyGPT, приёмник. Всё в этом файле - секрет: с этим можно ходить через ваш сервер."
+    echo
+    echo "# Страница подписки для Happ: вставить ссылку подписки своего VPN -> «Добавить в Happ»"
+    echo "https://${DOMAIN}/happ/${PG_SUB_TOKEN}/"
+    echo
+    echo "# Ссылка приёмника для клиентов Xray (Happ, v2RayTun, Streisand) и для tools/happ_relay.py"
+    echo "$RELAY_LINK"
     echo
     echo "# Выход Xray для цепочки через другой VPN: dialerProxy - тег сервера этого VPN в его профиле."
     printf '{"tag":"proxygpt","protocol":"vless","settings":{"vnext":[{"address":"%s","port":443,"users":[{"id":"%s","encryption":"none"}]}]},"streamSettings":{"network":"ws","security":"tls","tlsSettings":{"serverName":"%s","fingerprint":"chrome","alpn":["http/1.1"]},"wsSettings":{"path":"%s","host":"%s"},"sockopt":{"dialerProxy":"<тег сервера VPN>"}}}\n' "$IP" "$PG_RELAY_UUID" "$DOMAIN" "$PG_RELAY_PATH" "$DOMAIN"
   } > "$DIR/relay.txt"
   chmod 600 "$DIR/relay.txt"
+  # сервис страницы и подписки Happ
+  mkdir -p "$DIR/app"
+  curl -fsSL "$RAW/tools/happ_relay.py" -o "$DIR/app/happ_relay.py.new" && mv "$DIR/app/happ_relay.py.new" "$DIR/app/happ_relay.py" \
+    || { [ -f "$DIR/app/happ_relay.py" ] && warn "не удалось обновить happ_relay.py, оставляю прежний" || die "не удалось скачать $RAW/tools/happ_relay.py"; }
+  chmod 644 "$DIR/app/happ_relay.py"
+  printf 'RELAY_LINK=%s\nSUB_TOKEN=%s\nSITES=%s\n' "$RELAY_LINK" "$PG_SUB_TOKEN" "${SITES[*]}" > "$DIR/sub.env"
+  chmod 600 "$DIR/sub.env"
 else
-  rm -f "$DIR/conf/relay-location.conf" "$DIR/conf/xray.json" "$DIR/relay.txt"
+  rm -f "$DIR/conf/relay-location.conf" "$DIR/conf/xray.json" "$DIR/relay.txt" "$DIR/sub.env"
 fi
 
 cat > "$DIR/compose.yml" <<'EOF'
@@ -458,6 +494,18 @@ if [ "$RELAY" = 1 ]; then
     volumes:
       - ./conf:/etc/proxygpt:ro
     command: ["run", "-c", "/etc/proxygpt/xray.json"]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
+  sub:
+    image: python:3-alpine
+    container_name: proxygpt-sub
+    restart: unless-stopped
+    network_mode: host
+    user: "65534:65534"
+    env_file: sub.env
+    volumes:
+      - ./app:/app:ro
+    command: ["python3", "-I", "/app/happ_relay.py", "--serve", "127.0.0.1:8446"]
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
 EOF
 fi
@@ -592,15 +640,16 @@ cat <<'EOF' | fill > "$DIR/www/index.html"
 <h2>Проверка</h2>
 <p>Выключите VPN, если он включён, и откройте на настроенном устройстве три адреса:</p>
 <ol>
-  <li><a href="https://__SITE__/cdn-cgi/trace">__SITE__/cdn-cgi/trace</a> - должно быть <code>ip=__IP__</code> и <code>loc=__LOC__</code>: сайт идёт через сервер.</li>
+__CHECK_ITEMS__
   <li><a href="https://www.cloudflare.com/cdn-cgi/trace">cloudflare.com/cdn-cgi/trace</a> - здесь должен быть ваш обычный IP: остальные сайты идут напрямую.</li>
   <li><a href="https://__DOMAIN__/">эта страница</a> открывается - DNS-сервер доступен.</li>
 </ol>
-<p>В пункте 1 ваш обычный IP - DNS на устройстве не применился (см. ниже). Везде <code>__IP__</code> - включён VPN через этот же сервер.</p>
+<p>В проверке Claude или ChatGPT ваш обычный IP - DNS на устройстве не применился (см. ниже). Везде <code>__IP__</code> - включён VPN через этот же сервер.</p>
 <p>Из командной строки:</p>
 <pre>Mac, Linux:  curl -s https://__SITE__/cdn-cgi/trace | grep -E '^(ip|loc)='
 Windows:     Resolve-DnsName __SITE__ -Type A        (IPAddress должен быть __IP__)
-Android:     открыть в браузере __SITE__/cdn-cgi/trace</pre>
+Android:     открыть в браузере __SITE__/cdn-cgi/trace
+__CHECK_CLI__</pre>
 
 <h2>Если не работает</h2>
 <ul>
@@ -641,5 +690,5 @@ $( [ $ok = 1 ] && printf '\033[1;32mГотово.\033[0m' || printf '\033[1;33m�
 Журнал прокси: docker logs -f proxygpt-nginx
 Проверка на устройстве: https://$DOMAIN/ (раздел «Проверка»)
 Проверка на сервере: та же команда установки с параметром --check
-$( [ "$RELAY" = 1 ] && printf 'Приёмник для цепочки через другой VPN: включён, данные для клиента - %s/relay.txt (секрет)' "$DIR" )
+$( [ "$RELAY" = 1 ] && printf 'Приёмник для работы через другой VPN: включён. Страница подписки Happ и ссылка приёмника - в %s/relay.txt (секрет)' "$DIR" )
 EOF
