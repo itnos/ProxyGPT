@@ -51,7 +51,15 @@ wget -qO- https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bas
 - проверит, что имя указывает на этот сервер и порты свободны;
 - выпустит сертификат и настроит его продление;
 - соберёт настройки, запустит контейнеры и проверит, что DNS и прокси отвечают;
-- напечатает адрес страницы с настройкой устройств: `https://dns.example.com/`.
+- напечатает **секретную ссылку на страницу настройки устройств** вида `https://dns.example.com/<секрет>/`.
+
+Все секретные ссылки (страница устройств, страница подписки Happ, ключ приёмника) скрипт хранит на сервере в одном файле `/opt/proxygpt/links.txt` (читать может только root). Посмотреть с компьютера:
+
+```bash
+ssh root@<IP сервера> cat /opt/proxygpt/links.txt
+```
+
+Ссылки **не меняются** при повторных запусках установки: секреты хранятся в `/opt/proxygpt/settings.env`. Корень `https://dns.example.com/` без секрета отвечает 404, открыт только адрес DNS-запросов `/dns-query`, его используют устройства.
 
 Дополнительные параметры:
 
@@ -66,11 +74,11 @@ wget -qO- https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bas
 
 ## Настройка устройств
 
-Проще всего открыть на устройстве `https://dns.example.com/` (ваше имя): там все инструкции с вашими адресами и кнопкой профиля. То же самое коротко:
+Проще всего открыть на устройстве **секретную ссылку на страницу настройки**, которую напечатала установка (`https://dns.example.com/<секрет>/`, она же в `links.txt`): там все инструкции с вашими адресами и кнопкой профиля. То же самое коротко (`<секрет>` - из вашей ссылки):
 
 ### iPhone и iPad
 
-1. В **Safari** откройте `https://dns.example.com/apple.mobileconfig`, нажмите «Разрешить».
+1. В **Safari** откройте `https://dns.example.com/<секрет>/apple.mobileconfig` (кнопка «Скачать профиль DNS» на странице настройки), нажмите «Разрешить».
 2. Настройки → вверху «Профиль загружен» → **Установить**.
 3. Проверка: Настройки → Основные → VPN и управление устройством → DNS → выбран «ProxyGPT DNS».
 
@@ -79,7 +87,7 @@ wget -qO- https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bas
 ### Mac
 
 ```bash
-curl -fsSL https://dns.example.com/apple.mobileconfig -o ~/Downloads/proxygpt-dns.mobileconfig && open ~/Downloads/proxygpt-dns.mobileconfig
+curl -fsSL https://dns.example.com/<секрет>/apple.mobileconfig -o ~/Downloads/proxygpt-dns.mobileconfig && open ~/Downloads/proxygpt-dns.mobileconfig
 ```
 
 Затем Системные настройки → Основные → **Управление устройством** (или поиск «Профили») → «ProxyGPT DNS» → Установить.
@@ -97,7 +105,7 @@ dns.example.com
 PowerShell **от имени администратора**:
 
 ```powershell
-irm https://dns.example.com/windows.ps1 | iex
+irm https://dns.example.com/<секрет>/windows.ps1 | iex
 ```
 
 Скрипт добавляет ваш DNS-сервер с шифрованием (DoH) и ставит его на все активные подключения. Вернуть как было:
@@ -148,14 +156,14 @@ curl -fsSL https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | ba
 
 **Это секрет**: по ссылке можно ходить через ваш сервер. Не публикуйте её и не оставляйте на скриншотах.
 
-Где её найти потом. Скрипт хранит ссылку на сервере в файле `/opt/proxygpt/relay.txt` (читать может только root). Главное в нём:
+Где её найти потом. Скрипт хранит ссылки на сервере в файле `/opt/proxygpt/links.txt` (читать может только root). Для этого способа в нём:
 - `https://dns.example.com/happ/<секрет>/` - страница подписки Happ;
 - `vless://…` - ссылка самого приёмника для ручной настройки клиентов Xray и для `tools/happ_relay.py`.
 
 Посмотреть с компьютера:
 
 ```bash
-ssh root@<IP сервера> cat /opt/proxygpt/relay.txt
+ssh root@<IP сервера> cat /opt/proxygpt/links.txt
 ```
 
 Ссылка **не меняется** при повторных запусках установки (обновление, правка `sites.txt`, `--check`): секреты хранятся в `/opt/proxygpt/settings.env`. Новая появится только после `--uninstall` и установки заново или если сменить её специально (например, если ссылка попала к чужим людям):
@@ -169,7 +177,7 @@ sed -i '/^PG_RELAY_UUID=/d; /^PG_RELAY_PATH=/d' /opt/proxygpt/settings.env   # �
 
 ### 2. Подписка для Happ
 
-Откройте на телефоне **страницу подписки** - ссылку, которую напечатала установка (или из `/opt/proxygpt/relay.txt`, см. выше):
+Откройте на телефоне **страницу подписки** - ссылку, которую напечатала установка (или из `/opt/proxygpt/links.txt`, см. выше):
 
 1. Вставьте ссылку подписки своего VPN (ту, что открывается в Happ).
 2. Нажмите **«Добавить в Happ»**. Если приложение не открылось - «Скопировать ссылку», затем в Happ «+» → «Вставить из буфера».
@@ -182,12 +190,12 @@ sed -i '/^PG_RELAY_UUID=/d; /^PG_RELAY_PATH=/d' /opt/proxygpt/settings.env   # �
 **Без страницы**, файлом на компьютере (из папки репозитория):
 
 ```bash
-python3 tools/happ_relay.py --sub "https://ссылка-подписки-вашего-VPN" --relay "vless://...из relay.txt" -o happ-profiles.json
+python3 tools/happ_relay.py --sub "https://ссылка-подписки-вашего-VPN" --relay "vless://...из links.txt" -o happ-profiles.json
 ```
 
 Затем откройте файл на телефоне, скопируйте весь текст, Happ → «+» → «Импорт из буфера обмена». Такой файл - снимок подписки: если VPN-сервис сменит серверы, соберите его заново.
 
-**Секреты.** Страница подписки, ссылка подписки, `relay.txt` и файл профилей открывают путь через ваш сервер, а ссылка подписки ещё и содержит ссылку вашего VPN. Не пересылайте их. Приёмник в любом случае выпускает только сайты из `sites.txt`.
+**Секреты.** Страница подписки, ссылка подписки, `links.txt` и файл профилей открывают путь через ваш сервер, а ссылка подписки ещё и содержит ссылку вашего VPN. Не пересылайте их. Приёмник в любом случае выпускает только сайты из `sites.txt`.
 
 ## Список сайтов
 
@@ -231,9 +239,11 @@ curl -fsSL https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | ba
   ✓ DNS: claude.ai -> 203.0.113.10 (через сервер)
   ✓ DNS: example.com -> 93.184.215.14 (напрямую, как и должно)
   ✓ claude.ai видит адрес сервера: ip=203.0.113.10 loc=NL
+  ✓ страница устройств открывается по секретному адресу (адрес - в links.txt)
+  ✓ без секрета страница закрыта (https://dns.example.com/ - 404)
   ✓ приёмник: claude.ai через wss://dns.example.com выходит с адреса сервера   (если включён --relay)
   ✓ приёмник: сайты не из списка не пропускает
-  ✓ страница подписки Happ отвечает (адрес - в relay.txt)
+  ✓ страница подписки Happ отвечает (адрес - в links.txt)
   ✓ без секретного адреса страница подписки закрыта
   ✓ сертификат действует ещё 89 дн. (продлевается сам)
 ==> Всё работает.
@@ -263,7 +273,7 @@ curl -fsSL https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | ba
 | Windows | `Resolve-DnsName claude.ai -Type A` | `IPAddress` = IP сервера |
 | любая | `curl -s -o /dev/null -w '%{remote_ip}\n' --doh-url https://dns.example.com/dns-query https://claude.ai/` | IP сервера (проверка самого DNS-сервера, без настройки устройства) |
 
-На странице `https://dns.example.com/` есть тот же раздел «Проверка», уже с вашими адресами.
+На секретной странице настройки (`https://dns.example.com/<секрет>/`) есть тот же раздел «Проверка», уже с вашими адресами.
 
 ## Обслуживание
 

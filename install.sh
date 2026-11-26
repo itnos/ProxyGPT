@@ -99,7 +99,7 @@ EOF
   docker rm -f proxygpt-relay-test >/dev/null 2>&1 || true
   rm -f "$cfg"
   res="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://$DOMAIN/happ/$PG_SUB_TOKEN/" || true)"
-  [ "$res" = 200 ] && pass "страница подписки Happ отвечает (адрес - в relay.txt)" || fail "страница подписки Happ: код $res (docker logs proxygpt-sub)"
+  [ "$res" = 200 ] && pass "страница подписки Happ отвечает (адрес - в links.txt)" || fail "страница подписки Happ: код $res (docker logs proxygpt-sub)"
   res="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://$DOMAIN/happ/0000000000000000/" || true)"
   [ "$res" = 404 ] && pass "без секретного адреса страница подписки закрыта" || fail "страница подписки открылась без секрета (код $res)"
 }
@@ -128,6 +128,10 @@ run_checks() {
   res="$(curl -s --max-time 15 --doh-url "https://$DOMAIN/dns-query" "https://$CHECK_SITE/cdn-cgi/trace" || true)"
   ip="$(printf '%s\n' "$res" | sed -n 's/^ip=//p')"; loc="$(printf '%s\n' "$res" | sed -n 's/^loc=//p')"
   [ "$ip" = "$IP" ] && pass "$CHECK_SITE видит адрес сервера: ip=$ip loc=$loc" || fail "$CHECK_SITE видит ip='${ip:-?}' (нужно $IP)"
+  res="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://$DOMAIN/$PG_PAGE_TOKEN/" || true)"
+  [ "$res" = 200 ] && pass "страница устройств открывается по секретному адресу (адрес - в links.txt)" || fail "страница устройств: код $res"
+  res="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://$DOMAIN/" || true)"
+  [ "$res" = 404 ] && pass "без секрета страница закрыта (https://$DOMAIN/ - 404)" || fail "https://$DOMAIN/ отвечает $res, а должен 404"
   if [ "${RELAY:-0}" = 1 ]; then check_relay; fi
   days="$(( ( $(date -d "$(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" | cut -d= -f2)" +%s) - $(date +%s) ) / 86400 ))"
   [ "$days" -gt 7 ] && pass "сертификат действует ещё $days дн. (продлевается сам)" || fail "сертификат истекает через $days дн.: certbot renew"
@@ -255,6 +259,7 @@ chmod +x /etc/letsencrypt/renewal-hooks/deploy/proxygpt.sh
 LOC="$(curl -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace | sed -n 's/^loc=//p' || true)"
 PG_UUID1="${PG_UUID1:-$(cat /proc/sys/kernel/random/uuid)}"
 PG_UUID2="${PG_UUID2:-$(cat /proc/sys/kernel/random/uuid)}"
+PG_PAGE_TOKEN="${PG_PAGE_TOKEN:-$(openssl rand -hex 12)}"   # страница устройств - только по секретному адресу
 if [ "$RELAY" = 1 ]; then
   PG_RELAY_UUID="${PG_RELAY_UUID:-$(cat /proc/sys/kernel/random/uuid)}"
   PG_RELAY_PATH="${PG_RELAY_PATH:-/$(openssl rand -hex 12)}"
@@ -271,6 +276,7 @@ PG_RELAY=$RELAY
 PG_RELAY_UUID=${PG_RELAY_UUID:-}
 PG_RELAY_PATH=${PG_RELAY_PATH:-}
 PG_SUB_TOKEN=${PG_SUB_TOKEN:-}
+PG_PAGE_TOKEN=$PG_PAGE_TOKEN
 EOF
 chmod 600 "$DIR/settings.env"
 
@@ -283,7 +289,7 @@ for d in claude.ai chatgpt.com; do
 done
 [ -n "$CHECK_ITEMS" ] || CHECK_ITEMS="  <li><a href=\"https://__SITE__/cdn-cgi/trace\">__SITE__/cdn-cgi/trace</a> - должно быть <code>ip=__IP__</code>: сайт идёт через сервер.</li>"
 
-fill() { sed -e "s|__CHECK_ITEMS__|$CHECK_ITEMS|g" -e "s|__CHECK_CLI__|$CHECK_CLI|g" -e "s|__DOMAIN__|$DOMAIN|g" -e "s|__IP__|$IP|g" -e "s|__LOC__|${LOC:-??}|g" -e "s|__SITE__|$CHECK_SITE|g" -e "s|__UUID1__|$PG_UUID1|g" -e "s|__UUID2__|$PG_UUID2|g" -e "s|__RELAY_UUID__|${PG_RELAY_UUID:-}|g" -e "s|__RELAY_PATH__|${PG_RELAY_PATH:-}|g"; }
+fill() { sed -e "s|__PAGE__|$PG_PAGE_TOKEN|g" -e "s|__CHECK_ITEMS__|$CHECK_ITEMS|g" -e "s|__CHECK_CLI__|$CHECK_CLI|g" -e "s|__DOMAIN__|$DOMAIN|g" -e "s|__IP__|$IP|g" -e "s|__LOC__|${LOC:-??}|g" -e "s|__SITE__|$CHECK_SITE|g" -e "s|__UUID1__|$PG_UUID1|g" -e "s|__UUID2__|$PG_UUID2|g" -e "s|__RELAY_UUID__|${PG_RELAY_UUID:-}|g" -e "s|__RELAY_PATH__|${PG_RELAY_PATH:-}|g"; }
 
 # nginx: SNI-прокси на 443 (без расшифровки) + страница и DoH для имени DNS-сервера
 {
@@ -333,9 +339,6 @@ http {
         server_name __DOMAIN__;
         ssl_certificate     /etc/letsencrypt/live/__DOMAIN__/fullchain.pem;
         ssl_certificate_key /etc/letsencrypt/live/__DOMAIN__/privkey.pem;
-        root /srv/www;
-        index index.html;
-
         location = /dns-query {
             proxy_pass https://127.0.0.1:8444;
             proxy_http_version 1.1;
@@ -344,9 +347,16 @@ http {
             proxy_set_header Host __DOMAIN__;
             proxy_buffering off;
         }
-        location = /apple.mobileconfig { default_type application/x-apple-aspen-config; }
-        location = /windows.ps1        { default_type text/plain; }
+        # Страница настройки устройств - только по секретному адресу /<секрет>/, корень закрыт.
+        location = /__PAGE__ { return 301 /__PAGE__/; }
+        location ^~ /__PAGE__/ {
+            alias /srv/www/;
+            index index.html;
+            types { text/html html; application/x-apple-aspen-config mobileconfig; text/plain ps1; }
+            default_type application/octet-stream;
+        }
         include /etc/nginx/proxygpt/relay-location*.conf;   # приёмник (--relay), если включён
+        location / { return 404; }
     }
 }
 EOF
@@ -432,19 +442,6 @@ EOF
 EOF
   chmod 644 "$DIR/conf/xray.json"
   RELAY_LINK="vless://${PG_RELAY_UUID}@${IP}:443?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome&alpn=http%2F1.1&type=ws&host=${DOMAIN}&path=$(printf '%s' "$PG_RELAY_PATH" | sed 's|/|%2F|g')#ProxyGPT-${DOMAIN}"
-  {
-    echo "# ProxyGPT, приёмник. Всё в этом файле - секрет: с этим можно ходить через ваш сервер."
-    echo
-    echo "# Страница подписки для Happ: вставить ссылку подписки своего VPN -> «Добавить в Happ»"
-    echo "https://${DOMAIN}/happ/${PG_SUB_TOKEN}/"
-    echo
-    echo "# Ссылка приёмника для клиентов Xray (Happ, v2RayTun, Streisand) и для tools/happ_relay.py"
-    echo "$RELAY_LINK"
-    echo
-    echo "# Выход Xray для цепочки через другой VPN: dialerProxy - тег сервера этого VPN в его профиле."
-    printf '{"tag":"proxygpt","protocol":"vless","settings":{"vnext":[{"address":"%s","port":443,"users":[{"id":"%s","encryption":"none"}]}]},"streamSettings":{"network":"ws","security":"tls","tlsSettings":{"serverName":"%s","fingerprint":"chrome","alpn":["http/1.1"]},"wsSettings":{"path":"%s","host":"%s"},"sockopt":{"dialerProxy":"<тег сервера VPN>"}}}\n' "$IP" "$PG_RELAY_UUID" "$DOMAIN" "$PG_RELAY_PATH" "$DOMAIN"
-  } > "$DIR/relay.txt"
-  chmod 600 "$DIR/relay.txt"
   # сервис страницы и подписки Happ
   mkdir -p "$DIR/app"
   curl -fsSL "$RAW/tools/happ_relay.py" -o "$DIR/app/happ_relay.py.new" && mv "$DIR/app/happ_relay.py.new" "$DIR/app/happ_relay.py" \
@@ -453,8 +450,29 @@ EOF
   printf 'RELAY_LINK=%s\nSUB_TOKEN=%s\nSITES=%s\n' "$RELAY_LINK" "$PG_SUB_TOKEN" "${SITES[*]}" > "$DIR/sub.env"
   chmod 600 "$DIR/sub.env"
 else
-  rm -f "$DIR/conf/relay-location.conf" "$DIR/conf/xray.json" "$DIR/relay.txt" "$DIR/sub.env"
+  rm -f "$DIR/conf/relay-location.conf" "$DIR/conf/xray.json" "$DIR/sub.env"
 fi
+
+# Все секретные ссылки - в одном файле (только root).
+{
+  echo "# ProxyGPT: секретные ссылки. С ними можно пользоваться вашим сервером - никому не пересылайте."
+  echo
+  echo "# Страница настройки устройств: профиль DNS для iPhone и Mac, Android, Windows, проверка"
+  echo "https://${DOMAIN}/${PG_PAGE_TOKEN}/"
+  if [ "$RELAY" = 1 ]; then
+    echo
+    echo "# Страница подписки Happ (работа через другой VPN): вставить ссылку подписки VPN -> «Добавить в Happ»"
+    echo "https://${DOMAIN}/happ/${PG_SUB_TOKEN}/"
+    echo
+    echo "# Ссылка приёмника для клиентов Xray (Happ, v2RayTun, Streisand) и для tools/happ_relay.py"
+    echo "$RELAY_LINK"
+    echo
+    echo "# Выход Xray для цепочки через другой VPN: dialerProxy - тег сервера этого VPN в его профиле."
+    printf '{"tag":"proxygpt","protocol":"vless","settings":{"vnext":[{"address":"%s","port":443,"users":[{"id":"%s","encryption":"none"}]}]},"streamSettings":{"network":"ws","security":"tls","tlsSettings":{"serverName":"%s","fingerprint":"chrome","alpn":["http/1.1"]},"wsSettings":{"path":"%s","host":"%s"},"sockopt":{"dialerProxy":"<тег сервера VPN>"}}}\n' "$IP" "$PG_RELAY_UUID" "$DOMAIN" "$PG_RELAY_PATH" "$DOMAIN"
+  fi
+} > "$DIR/links.txt"
+chmod 600 "$DIR/links.txt"
+rm -f "$DIR/relay.txt"   # прежнее место ссылок приёмника
 
 cat > "$DIR/compose.yml" <<'EOF'
 # Сгенерировано install.sh.
@@ -568,7 +586,7 @@ EOF
 # Windows 11: DNS через DoH для всех активных сетевых подключений (PowerShell от администратора)
 cat <<'EOF' | fill > "$DIR/www/windows.ps1"
 # ProxyGPT DNS for Windows 11. Run in PowerShell as Administrator:
-#   irm https://__DOMAIN__/windows.ps1 | iex
+#   irm https://__DOMAIN__/__PAGE__/windows.ps1 | iex
 # Undo:
 #   Get-NetAdapter | % { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses }
 $ip  = '__IP__'
@@ -614,13 +632,13 @@ cat <<'EOF' | fill > "$DIR/www/index.html"
 
 <h2>iPhone и iPad</h2>
 <ol>
-  <li>Откройте эту страницу в <b>Safari</b> и нажмите кнопку: <br><a class="btn" href="/apple.mobileconfig">Скачать профиль DNS</a></li>
+  <li>Откройте эту страницу в <b>Safari</b> и нажмите кнопку: <br><a class="btn" href="apple.mobileconfig">Скачать профиль DNS</a></li>
   <li>«Разрешить» → Настройки → вверху «Профиль загружен» → Установить.</li>
   <li>Проверьте: Настройки → Основные → VPN и управление устройством → DNS → выбран «ProxyGPT DNS».</li>
 </ol>
 
 <h2>Mac</h2>
-<pre>curl -fsSL https://__DOMAIN__/apple.mobileconfig -o ~/Downloads/proxygpt-dns.mobileconfig &amp;&amp; open ~/Downloads/proxygpt-dns.mobileconfig</pre>
+<pre>curl -fsSL https://__DOMAIN__/__PAGE__/apple.mobileconfig -o ~/Downloads/proxygpt-dns.mobileconfig &amp;&amp; open ~/Downloads/proxygpt-dns.mobileconfig</pre>
 <p>Затем Системные настройки → Основные → Управление устройством (или поиск «Профили») → «ProxyGPT DNS» → Установить.</p>
 
 <h2>Android 9 и новее</h2>
@@ -631,7 +649,7 @@ cat <<'EOF' | fill > "$DIR/www/index.html"
 
 <h2>Windows 11</h2>
 <p>PowerShell <b>от имени администратора</b>:</p>
-<pre>irm https://__DOMAIN__/windows.ps1 | iex</pre>
+<pre>irm https://__DOMAIN__/__PAGE__/windows.ps1 | iex</pre>
 <p class="muted">Вернуть как было: <code>Get-NetAdapter | % { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses }</code></p>
 
 <h2>Linux (systemd-resolved)</h2>
@@ -642,7 +660,7 @@ cat <<'EOF' | fill > "$DIR/www/index.html"
 <ol>
 __CHECK_ITEMS__
   <li><a href="https://www.cloudflare.com/cdn-cgi/trace">cloudflare.com/cdn-cgi/trace</a> - здесь должен быть ваш обычный IP: остальные сайты идут напрямую.</li>
-  <li><a href="https://__DOMAIN__/">эта страница</a> открывается - DNS-сервер доступен.</li>
+  <li><a href="https://__DOMAIN__/__PAGE__/">эта страница</a> открывается - сервер доступен.</li>
 </ol>
 <p>В проверке Claude или ChatGPT ваш обычный IP - DNS на устройстве не применился (см. ниже). Везде <code>__IP__</code> - включён VPN через этот же сервер.</p>
 <p>Из командной строки:</p>
@@ -680,15 +698,18 @@ cat <<EOF
 
 $( [ $ok = 1 ] && printf '\033[1;32mГотово.\033[0m' || printf '\033[1;33mУстановлено, но проверка нашла ошибки (см. выше).\033[0m' )
 
-Страница с настройкой устройств:  https://$DOMAIN/
-  iPhone, iPad, Mac:  https://$DOMAIN/apple.mobileconfig  (профиль DNS)
+Страница настройки устройств (секретная, откройте на телефоне):
+
+  https://$DOMAIN/$PG_PAGE_TOKEN/
+
+  iPhone, iPad, Mac:  https://$DOMAIN/$PG_PAGE_TOKEN/apple.mobileconfig  (профиль DNS)
   Android:            Частный DNS -> $DOMAIN
-  Windows 11:         irm https://$DOMAIN/windows.ps1 | iex   (PowerShell от администратора)
+  Windows 11:         irm https://$DOMAIN/$PG_PAGE_TOKEN/windows.ps1 | iex   (PowerShell от администратора)
 
 Сайты: ${SITES[*]}
 Правка списка: $DIR/sites.txt, затем запустить установку ещё раз.
 Журнал прокси: docker logs -f proxygpt-nginx
-Проверка на устройстве: https://$DOMAIN/ (раздел «Проверка»)
+Проверка на устройстве: раздел «Проверка» на странице настройки
 Проверка на сервере: та же команда установки с параметром --check
 EOF
 
@@ -701,6 +722,6 @@ if [ "$RELAY" = 1 ]; then
   https://$DOMAIN/happ/$PG_SUB_TOKEN/
 
 Ссылка секретная: по ней можно ходить через ваш сервер. Она не меняется при повторных запусках установки.
-Посмотреть её ещё раз:  cat $DIR/relay.txt
+Все секретные ссылки ещё раз:  cat $DIR/links.txt
 EOF
 fi

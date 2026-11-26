@@ -10,7 +10,7 @@
 
 Два режима:
   1) На компьютере - собрать файл профилей:
-       python3 tools/happ_relay.py --sub "https://подписка-вашего-vpn" --relay "vless://...из relay.txt" -o happ.json
+       python3 tools/happ_relay.py --sub "https://подписка-вашего-vpn" --relay "vless://...из links.txt" -o happ.json
   2) На сервере (его запускает install.sh --relay) - страница и своя подписка для Happ, которая при каждом
      обновлении берёт свежие профили VPN:
        RELAY_LINK=vless://... SUB_TOKEN=секрет python3 happ_relay.py --serve 127.0.0.1:8446
@@ -75,7 +75,7 @@ def fetch_subscription(url: str, user_agent: str = "Happ/3.0"):
 def parse_relay(link: str) -> dict:
     u = urllib.parse.urlsplit(link.strip())
     if u.scheme != "vless" or not u.username or not u.hostname:
-        sys.exit("нужна ссылка приёмника vless://... из /opt/proxygpt/relay.txt")
+        sys.exit("нужна ссылка приёмника vless://... из /opt/proxygpt/links.txt")
     q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
     if q.get("type") != "ws" or q.get("security") != "tls":
         sys.exit("ожидается ссылка приёмника ProxyGPT (type=ws, security=tls)")
@@ -223,7 +223,7 @@ def main():
     ap.add_argument("--serve", metavar="HOST:PORT", help="режим сервера (страница и подписка Happ)")
     ap.add_argument("--sub", help="ссылка JSON-подписки VPN (формат Happ)")
     ap.add_argument("--in", dest="infile", help="или уже скачанный JSON-файл подписки")
-    ap.add_argument("--relay", help="vless://... из /opt/proxygpt/relay.txt на сервере")
+    ap.add_argument("--relay", help="vless://... из /opt/proxygpt/links.txt на сервере")
     ap.add_argument("--sites", default=" ".join(DEFAULT_SITES), help="сайты через ваш сервер (через пробел)")
     ap.add_argument("-o", "--out", help="куда записать профили для Happ")
     a = ap.parse_args()
