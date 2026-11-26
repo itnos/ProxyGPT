@@ -3,12 +3,16 @@
 #
 # Установка и обновление одной командой (Debian или Ubuntu, от root):
 #   curl -fsSL https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bash -s -- --domain dns.example.com --agree-tos
+# Без curl:
+#   wget -qO- https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bash -s -- --domain dns.example.com --agree-tos
+# Проверка:
+#   ... | bash -s -- --check
 #
 # Подробно - README.md: https://github.com/itnos/ProxyGPT
 set -Eeuo pipefail
 
 DIR=/opt/proxygpt
-DOMAIN="" IP="" EMAIL="" SITES_ARG="" AGREE=0 UNINSTALL=0
+DOMAIN="" IP="" EMAIL="" SITES_ARG="" AGREE=0 UNINSTALL=0 CHECK=0
 DEFAULT_SITES="claude.ai claude.com anthropic.com claudeusercontent.com chatgpt.com openai.com oaistatic.com oaiusercontent.com"
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
@@ -26,6 +30,7 @@ ProxyGPT - SNI-прокси и свой DNS, чтобы claude.ai и chatgpt.com
   --ip 203.0.113.10          внешний IP сервера, если не определился сам
   --sites "a.com b.com"      какие сайты пускать (по умолчанию Claude и ChatGPT); иначе правьте /opt/proxygpt/sites.txt
   --dir /opt/proxygpt        куда ставить
+  --check                    только проверить, что DNS и прокси работают
   --uninstall                удалить (сертификат остаётся)
 
 Повторный запуск без параметров применяет правки sites.txt и обновляет образы.
@@ -40,6 +45,7 @@ while [ $# -gt 0 ]; do
     --sites)     SITES_ARG="${2:-}"; shift 2 ;;
     --dir)       DIR="${2:-}"; shift 2 ;;
     --agree-tos) AGREE=1; shift ;;
+    --check)     CHECK=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h|--help)   usage; exit 0 ;;
     *)           usage; die "неизвестный параметр: $1" ;;
@@ -59,6 +65,42 @@ IP="${IP:-${PG_IP:-}}"
 EMAIL="${EMAIL:-${PG_EMAIL:-}}"
 DOMAIN="$(printf '%s' "$DOMAIN" | tr 'A-Z' 'a-z')"
 
+read_sites() {
+  mapfile -t SITES < <(sed 's/#.*//' "$DIR/sites.txt" | tr 'A-Z' 'a-z' | tr -s ' \t' '\n' | grep -v '^$' | sort -u)
+  CHECK_SITE="${SITES[0]:-}"
+  for d in chatgpt.com claude.ai; do printf '%s\n' "${SITES[@]}" | grep -qx "$d" && CHECK_SITE="$d"; done
+}
+
+# Проверка: контейнеры, DoT, DoH, маршрут сайтов из списка и обычных сайтов, срок сертификата.
+run_checks() {
+  local ok=1 res ip loc days d
+  pass() { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
+  fail() { printf '  \033[1;31m✗\033[0m %s\n' "$*"; ok=0; }
+  say "Проверка ($DOMAIN, сервер $IP)"
+  for c in proxygpt-nginx proxygpt-dns; do
+    [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ] && pass "контейнер $c работает" || fail "контейнер $c не работает: docker logs $c"
+  done
+  if echo | timeout 10 openssl s_client -connect "127.0.0.1:853" -servername "$DOMAIN" -verify_hostname "$DOMAIN" -verify_return_error >/dev/null 2>&1; then
+    pass "DoT (порт 853, Android): отвечает, сертификат действителен"
+  else fail "DoT (порт 853) не отвечает или сертификат не подходит"; fi
+  # Ответ DNS по каждому сайту: curl спрашивает адрес у нашего DoH и пишет его в подробный вывод (IPv4: ...);
+  # порт 853 открыт на сервере всегда, поэтому ответ виден, даже если у сайта нет корневого имени (oaiusercontent.com).
+  for d in "${SITES[@]}"; do
+    res="$(curl -sv -o /dev/null --connect-timeout 5 --max-time 10 --doh-url "https://$DOMAIN/dns-query" "https://$d:853/" 2>&1 \
+      | sed -nE 's/^\* +IPv4: ([0-9.]+).*/\1/p; s/^\* +Trying ([0-9.]+):.*/\1/p' | head -1 || true)"
+    [ "$res" = "$IP" ] && pass "DNS: $d -> $IP (через сервер)" || fail "DNS: $d -> '${res:-нет ответа}', ожидался $IP"
+  done
+  res="$(curl -s -o /dev/null -w '%{remote_ip}' --max-time 15 --doh-url "https://$DOMAIN/dns-query" https://example.com/ || true)"
+  [ -n "$res" ] && [ "$res" != "$IP" ] && pass "DNS: example.com -> $res (напрямую, как и должно)" || fail "DNS: example.com -> '${res:-нет ответа}'"
+  res="$(curl -s --max-time 15 --doh-url "https://$DOMAIN/dns-query" "https://$CHECK_SITE/cdn-cgi/trace" || true)"
+  ip="$(printf '%s\n' "$res" | sed -n 's/^ip=//p')"; loc="$(printf '%s\n' "$res" | sed -n 's/^loc=//p')"
+  [ "$ip" = "$IP" ] && pass "$CHECK_SITE видит адрес сервера: ip=$ip loc=$loc" || fail "$CHECK_SITE видит ip='${ip:-?}' (нужно $IP)"
+  days="$(( ( $(date -d "$(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" | cut -d= -f2)" +%s) - $(date +%s) ) / 86400 ))"
+  [ "$days" -gt 7 ] && pass "сертификат действует ещё $days дн. (продлевается сам)" || fail "сертификат истекает через $days дн.: certbot renew"
+  [ "$ok" = 1 ] && say "Всё работает." || warn "Есть ошибки (см. выше)."
+  [ "$ok" = 1 ]
+}
+
 # ---------- Docker и Compose ----------
 
 compose() { $COMPOSE -p proxygpt -f "$DIR/compose.yml" "$@"; }
@@ -68,6 +110,13 @@ find_compose() {
   elif command -v docker-compose >/dev/null 2>&1; then COMPOSE="docker-compose"
   else return 1; fi
 }
+
+if [ "$CHECK" = 1 ]; then
+  [ -f "$DIR/settings.env" ] && [ -f "$DIR/sites.txt" ] || die "ProxyGPT в $DIR не установлен"
+  read_sites
+  run_checks
+  exit $?
+fi
 
 if [ "$UNINSTALL" = 1 ]; then
   [ -d "$DIR" ] || die "в $DIR ничего не установлено"
@@ -127,7 +176,7 @@ if [ -n "$SITES_ARG" ] || [ ! -f "$DIR/sites.txt" ]; then
     for d in ${SITES_ARG:-$DEFAULT_SITES}; do echo "$d"; done
   } > "$DIR/sites.txt"
 fi
-mapfile -t SITES < <(sed 's/#.*//' "$DIR/sites.txt" | tr 'A-Z' 'a-z' | tr -s ' \t' '\n' | grep -v '^$' | sort -u)
+read_sites
 [ ${#SITES[@]} -gt 0 ] || die "список сайтов $DIR/sites.txt пуст"
 for d in "${SITES[@]}"; do
   [[ "$d" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || die "в sites.txt странная строка: $d"
@@ -169,6 +218,7 @@ chmod +x /etc/letsencrypt/renewal-hooks/deploy/proxygpt.sh
 
 # ---------- настройки ----------
 
+LOC="$(curl -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace | sed -n 's/^loc=//p' || true)"
 PG_UUID1="${PG_UUID1:-$(cat /proc/sys/kernel/random/uuid)}"
 PG_UUID2="${PG_UUID2:-$(cat /proc/sys/kernel/random/uuid)}"
 cat > "$DIR/settings.env" <<EOF
@@ -180,7 +230,7 @@ PG_UUID1=$PG_UUID1
 PG_UUID2=$PG_UUID2
 EOF
 
-fill() { sed -e "s|__DOMAIN__|$DOMAIN|g" -e "s|__IP__|$IP|g" -e "s|__UUID1__|$PG_UUID1|g" -e "s|__UUID2__|$PG_UUID2|g"; }
+fill() { sed -e "s|__DOMAIN__|$DOMAIN|g" -e "s|__IP__|$IP|g" -e "s|__LOC__|${LOC:-??}|g" -e "s|__SITE__|$CHECK_SITE|g" -e "s|__UUID1__|$PG_UUID1|g" -e "s|__UUID2__|$PG_UUID2|g"; }
 
 # nginx: SNI-прокси на 443 (без расшифровки) + страница и DoH для имени DNS-сервера
 {
@@ -435,6 +485,19 @@ cat <<'EOF' | fill > "$DIR/www/index.html"
 <h2>Linux (systemd-resolved)</h2>
 <pre>sudo mkdir -p /etc/systemd/resolved.conf.d &amp;&amp; printf '[Resolve]\nDNS=__IP__#__DOMAIN__\nDNSOverTLS=yes\n' | sudo tee /etc/systemd/resolved.conf.d/proxygpt.conf &amp;&amp; sudo systemctl restart systemd-resolved</pre>
 
+<h2>Проверка</h2>
+<p>Выключите VPN, если он включён, и откройте на настроенном устройстве три адреса:</p>
+<ol>
+  <li><a href="https://__SITE__/cdn-cgi/trace">__SITE__/cdn-cgi/trace</a> - должно быть <code>ip=__IP__</code> и <code>loc=__LOC__</code>: сайт идёт через сервер.</li>
+  <li><a href="https://www.cloudflare.com/cdn-cgi/trace">cloudflare.com/cdn-cgi/trace</a> - здесь должен быть ваш обычный IP: остальные сайты идут напрямую.</li>
+  <li><a href="https://__DOMAIN__/">эта страница</a> открывается - DNS-сервер доступен.</li>
+</ol>
+<p>В пункте 1 ваш обычный IP - DNS на устройстве не применился (см. ниже). Везде <code>__IP__</code> - включён VPN через этот же сервер.</p>
+<p>Из командной строки:</p>
+<pre>Mac, Linux:  curl -s https://__SITE__/cdn-cgi/trace | grep -E '^(ip|loc)='
+Windows:     Resolve-DnsName __SITE__ -Type A        (IPAddress должен быть __IP__)
+Android:     открыть в браузере __SITE__/cdn-cgi/trace</pre>
+
 <h2>Если не работает</h2>
 <ul>
   <li>iPhone и Mac: выключите «Частный узел iCloud» (Private Relay) - он обходит DNS в Safari.</li>
@@ -458,13 +521,7 @@ done
 # ---------- проверка ----------
 
 ok=1
-if echo | timeout 10 openssl s_client -connect "127.0.0.1:853" -servername "$DOMAIN" >/dev/null 2>&1; then
-  say "DoT (порт 853): отвечает"
-else warn "DoT (порт 853) не отвечает"; ok=0; fi
-res="$(curl -s -o /dev/null -w '%{http_code} %{remote_ip}' --max-time 20 --doh-url "https://$DOMAIN/dns-query" "https://${SITES[0]}/" || true)"
-if [ "${res#* }" = "$IP" ]; then
-  say "DoH и SNI-прокси: ${SITES[0]} -> $IP, ответ сайта ${res%% *} (403 у Cloudflare для curl - нормально, браузер пройдёт)"
-else warn "DoH или SNI-прокси: неожиданный ответ '$res'"; ok=0; fi
+run_checks || ok=0
 
 cat <<EOF
 
@@ -478,4 +535,6 @@ $( [ $ok = 1 ] && printf '\033[1;32mГотово.\033[0m' || printf '\033[1;33m�
 Сайты: ${SITES[*]}
 Правка списка: $DIR/sites.txt, затем запустить установку ещё раз.
 Журнал прокси: docker logs -f proxygpt-nginx
+Проверка на устройстве: https://$DOMAIN/ (раздел «Проверка»)
+Проверка на сервере: та же команда установки с параметром --check
 EOF

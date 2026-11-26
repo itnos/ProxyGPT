@@ -38,7 +38,13 @@
 curl -fsSL https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bash -s -- --domain dns.example.com --agree-tos
 ```
 
-Вместо `dns.example.com` укажите своё имя. `--agree-tos` - согласие с [условиями Let's Encrypt](https://letsencrypt.org/repository/): скрипт выпускает бесплатный сертификат для DNS-сервера.
+Если на сервере нет `curl`, то же самое через `wget`:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bash -s -- --domain dns.example.com --agree-tos
+```
+
+Вместо `dns.example.com` укажите своё имя. В нём можно использовать буквы, цифры и дефис, а **подчёркивание нельзя**: Let's Encrypt не выпускает сертификаты на такие имена. `--agree-tos` - согласие с [условиями Let's Encrypt](https://letsencrypt.org/repository/): скрипт выпускает бесплатный сертификат для DNS-сервера.
 
 Скрипт сам:
 - поставит Docker, Docker Compose и certbot, если их нет;
@@ -54,6 +60,7 @@ curl -fsSL https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | ba
 | `--email you@example.com` | почта для писем Let's Encrypt (по умолчанию без почты) |
 | `--sites "claude.ai anthropic.com"` | свой список сайтов вместо стандартного |
 | `--ip 203.0.113.10` | внешний IP, если сервер за NAT и IP не определился сам |
+| `--check` | только проверить, что всё работает (см. ниже) |
 | `--uninstall` | удалить всё, кроме сертификата |
 
 ## Настройка устройств
@@ -127,20 +134,66 @@ chatgpt.com  openai.com  oaistatic.com  oaiusercontent.com
 
 Отсюда главное ограничение: **если провайдер режет сайт по имени, этот способ на его сети не сработает.** Шифрование DNS тут не помогает, имя видно в самом соединении. В мобильных сетях блокировки бывают жёстче, чем в домашних.
 
-## Проверка и обслуживание
+## Проверка, что всё работает
+
+### На сервере
+
+Та же команда, что для установки, с параметром `--check`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh | bash -s -- --check
+```
+
+Она проверяет контейнеры, DoT (порт 853, для Android), ответ DNS по каждому сайту из списка, что обычные сайты идут напрямую, что сайт видит адрес сервера, и срок сертификата. Пример:
+
+```
+==> Проверка (dns.example.com, сервер 203.0.113.10)
+  ✓ контейнер proxygpt-nginx работает
+  ✓ контейнер proxygpt-dns работает
+  ✓ DoT (порт 853, Android): отвечает, сертификат действителен
+  ✓ DNS: chatgpt.com -> 203.0.113.10 (через сервер)
+  ✓ DNS: claude.ai -> 203.0.113.10 (через сервер)
+  ✓ DNS: example.com -> 93.184.215.14 (напрямую, как и должно)
+  ✓ claude.ai видит адрес сервера: ip=203.0.113.10 loc=NL
+  ✓ сертификат действует ещё 89 дн. (продлевается сам)
+==> Всё работает.
+```
+
+Такая же проверка запускается сама в конце каждой установки.
+
+### На устройстве
+
+**Выключите VPN**, если он включён, и откройте в браузере на настроенном устройстве:
+
+| Адрес | Что должно быть | Что это значит |
+|---|---|---|
+| `https://claude.ai/cdn-cgi/trace` | `ip=` **IP сервера**, `loc=` страна сервера | Claude идёт через сервер |
+| `https://chatgpt.com/cdn-cgi/trace` | то же | ChatGPT идёт через сервер |
+| `https://www.cloudflare.com/cdn-cgi/trace` | `ip=` **ваш обычный IP** | остальные сайты идут напрямую |
+
+Как понять результат:
+- В первых двух адресах ваш обычный IP: DNS на устройстве не применился, см. [Если не работает](#если-не-работает).
+- Везде IP сервера: включён VPN. Скорее всего, через этот же сервер, и он перекрывает проверку.
+
+Из командной строки:
+
+| Система | Команда | Ожидается |
+|---|---|---|
+| Mac, Linux | `curl -s https://claude.ai/cdn-cgi/trace \| grep -E '^(ip\|loc)='` | `ip=` IP сервера |
+| Windows | `Resolve-DnsName claude.ai -Type A` | `IPAddress` = IP сервера |
+| любая | `curl -s -o /dev/null -w '%{remote_ip}\n' --doh-url https://dns.example.com/dns-query https://claude.ai/` | IP сервера (проверка самого DNS-сервера, без настройки устройства) |
+
+На странице `https://dns.example.com/` есть тот же раздел «Проверка», уже с вашими адресами.
+
+## Обслуживание
 
 | Задача | Команда на сервере |
 |---|---|
 | Кто и куда ходит через прокси | `docker logs -f proxygpt-nginx` |
 | Журнал DNS | `docker logs -f proxygpt-dns` |
 | Применить правки `sites.txt`, обновить образы | та же команда установки, можно без параметров |
+| Проверить | та же команда с `--check` |
 | Удалить | `curl -fsSL https://raw.githubusercontent.com/itnos/ProxyGPT/main/install.sh \| bash -s -- --uninstall` |
-
-Проверка с компьютера, что DNS отвечает адресом сервера:
-
-```bash
-curl -s -o /dev/null -w '%{remote_ip}\n' --doh-url https://dns.example.com/dns-query https://claude.ai/
-```
 
 ## Если не работает
 
