@@ -31,7 +31,12 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DEFAULT_SITES = ["claude.ai", "claude.com", "anthropic.com", "claudeusercontent.com",
-                 "chatgpt.com", "openai.com", "oaistatic.com", "oaiusercontent.com"]
+                 "chatgpt.com", "openai.com", "oaistatic.com", "oaiusercontent.com",
+                 # Telegram (сайты и Telegram в браузере; на сервере список задаёт install.sh)
+                 "cdn-telegram.org", "comments.app", "contest.com", "fragment.com", "graph.org", "quiz.directory",
+                 "t.me", "tdesktop.com", "telega.one", "telegra.ph", "telegram-cdn.org", "telegram.dog",
+                 "telegram.me", "telegram.org", "telegram.space", "telesco.pe", "tg.dev", "ton.org", "tx.me",
+                 "usercontent.dev"]
 PASS_HEADERS = ("subscription-userinfo", "support-url", "profile-web-page-url")
 
 
