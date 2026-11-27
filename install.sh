@@ -13,12 +13,8 @@ set -Eeuo pipefail
 
 DIR=/opt/proxygpt
 RAW="${PROXYGPT_RAW:-https://raw.githubusercontent.com/itnos/ProxyGPT/main}"
-DOMAIN="" IP="" EMAIL="" SITES_ARG="" AGREE=0 UNINSTALL=0 CHECK=0 RELAY="" STOP="" START="" STATUS=0 PROXY="" TELEGRAM=""
+DOMAIN="" IP="" EMAIL="" SITES_ARG="" AGREE=0 UNINSTALL=0 CHECK=0 RELAY="" STOP="" START="" STATUS=0 PROXY=""
 DEFAULT_SITES="claude.ai claude.com anthropic.com claudeusercontent.com chatgpt.com openai.com oaistatic.com oaiusercontent.com"
-# Telegram - отдельный список (sites-telegram.txt), включён по умолчанию, выключается --no-telegram.
-# Через сервер идут Telegram в браузере (web.telegram.org) и сайты Telegram; само приложение Telegram
-# ходит по IP и протоколу MTProto, его DNS и SNI-прокси не касаются.
-TELEGRAM_SITES="cdn-telegram.org comments.app contest.com fragment.com graph.org quiz.directory t.me tdesktop.com telega.one telegra.ph telegram-cdn.org telegram.dog telegram.me telegram.org telegram.space telesco.pe tg.dev ton.org tx.me usercontent.dev"
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
@@ -37,8 +33,6 @@ ProxyGPT - SNI-прокси и свой DNS, чтобы claude.ai и chatgpt.com
   --dir /opt/proxygpt        куда ставить
   --relay                    включить приёмник для цепочки «другой VPN -> этот сервер -> сайт» (см. README)
   --no-relay                 выключить приёмник
-  --telegram                 пускать через сервер и сайты Telegram (включено по умолчанию; список - sites-telegram.txt)
-  --no-telegram              не пускать сайты Telegram
   --check                    только проверить, что DNS и прокси работают
   --status                   что запущено, что остановлено
   --stop  [all|dns|proxy|relay]   остановить: всё (по умолчанию), DNS, прокси сайтов или приёмник
@@ -66,8 +60,6 @@ while [ $# -gt 0 ]; do
       if [ "$act" = stop ]; then STOP="$what"; else START="$what"; fi ;;
     --relay)     RELAY=1; shift ;;
     --no-relay)  RELAY=0; shift ;;
-    --telegram)  TELEGRAM=1; shift ;;
-    --no-telegram) TELEGRAM=0; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h|--help)   usage; exit 0 ;;
     *)           usage; die "неизвестный параметр: $1" ;;
@@ -86,14 +78,11 @@ DOMAIN="${DOMAIN:-${PG_DOMAIN:-}}"
 IP="${IP:-${PG_IP:-}}"
 EMAIL="${EMAIL:-${PG_EMAIL:-}}"
 RELAY="${RELAY:-${PG_RELAY:-0}}"
-TELEGRAM="${TELEGRAM:-${PG_TELEGRAM:-1}}"
 PROXY="${PROXY:-${PG_PROXY:-1}}"   # 1 - сайты из списка идут через сервер, 0 - прокси выключен (--stop proxy)
 DOMAIN="$(printf '%s' "$DOMAIN" | tr 'A-Z' 'a-z')"
 
 read_sites() {
-  local files=("$DIR/sites.txt")
-  [ "${TELEGRAM:-1}" = 1 ] && [ -f "$DIR/sites-telegram.txt" ] && files+=("$DIR/sites-telegram.txt")
-  mapfile -t SITES < <(sed 's/#.*//' "${files[@]}" | tr 'A-Z' 'a-z' | tr -s ' \t' '\n' | grep -v '^$' | sort -u)
+  mapfile -t SITES < <(sed 's/#.*//' "$DIR/sites.txt" | tr 'A-Z' 'a-z' | tr -s ' \t' '\n' | grep -v '^$' | sort -u)
   CHECK_SITE="${SITES[0]:-}"
   for d in chatgpt.com claude.ai; do printf '%s\n' "${SITES[@]}" | grep -qx "$d" && CHECK_SITE="$d"; done
 }
@@ -190,8 +179,6 @@ show_status() {
     case "$st" in running) st="✓ работает " ;; exited|created) st="■ ОСТАНОВЛЕН" ;; "не установлен") st="- нет      " ;; esac
     printf '  %s  %-15s %s\n' "$st" "$n" "$d"
   done
-  if [ "$TELEGRAM" = 1 ]; then echo "  Telegram:       включён (sites-telegram.txt; выключить: --no-telegram)"
-  else echo "  Telegram:       выключен (включить: --telegram)"; fi
   if [ "$PROXY" = 1 ]; then echo "  прокси сайтов:  включён - сайты из sites.txt идут через сервер"
   else echo "  прокси сайтов:  выключен - DNS отдаёт настоящие адреса, сайты идут напрямую (включить: --start proxy)"; fi
 }
@@ -299,13 +286,6 @@ if [ -n "$SITES_ARG" ] || [ ! -f "$DIR/sites.txt" ]; then
     for d in ${SITES_ARG:-$DEFAULT_SITES}; do echo "$d"; done
   } > "$DIR/sites.txt"
 fi
-if [ ! -f "$DIR/sites-telegram.txt" ]; then
-  {
-    echo "# Сайты Telegram: идут через сервер, пока включено (по умолчанию; выключить - --no-telegram)."
-    echo "# Это Telegram в браузере и сайты Telegram. Приложение Telegram ходит по IP (MTProto) - его это не касается."
-    for d in $TELEGRAM_SITES; do echo "$d"; done
-  } > "$DIR/sites-telegram.txt"
-fi
 read_sites
 [ ${#SITES[@]} -gt 0 ] || die "список сайтов $DIR/sites.txt пуст"
 for d in "${SITES[@]}"; do
@@ -365,7 +345,6 @@ PG_EMAIL=$EMAIL
 PG_UUID1=$PG_UUID1
 PG_UUID2=$PG_UUID2
 PG_RELAY=$RELAY
-PG_TELEGRAM=$TELEGRAM
 PG_RELAY_UUID=${PG_RELAY_UUID:-}
 PG_RELAY_PATH=${PG_RELAY_PATH:-}
 PG_SUB_TOKEN=${PG_SUB_TOKEN:-}
@@ -813,7 +792,6 @@ $( [ $ok = 1 ] && printf '\033[1;32mГотово.\033[0m' || printf '\033[1;33m�
   Windows 11:         irm https://$DOMAIN/$PG_PAGE_TOKEN/windows.ps1 | iex   (PowerShell от администратора)
 
 Сайты: ${SITES[*]}$( [ "$PROXY" = 1 ] || printf '  (прокси ВЫКЛЮЧЕН - идут напрямую; включить: --start proxy)' )
-Telegram: $( [ "$TELEGRAM" = 1 ] && echo "включён (список - $DIR/sites-telegram.txt; выключить: --no-telegram)" || echo "выключен (включить: --telegram)" )
 Правка списка: $DIR/sites.txt, затем запустить установку ещё раз.
 Журнал прокси: docker logs -f proxygpt-nginx
 Проверка на устройстве: раздел «Проверка» на странице настройки

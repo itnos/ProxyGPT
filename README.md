@@ -95,7 +95,6 @@ ssh root@<IP сервера> cat /opt/proxygpt/links.txt
 |---|---|
 | `--email you@example.com` | почта для писем Let's Encrypt (по умолчанию без почты) |
 | `--sites "claude.ai anthropic.com"` | свой список сайтов вместо стандартного |
-| `--no-telegram` | не пускать через сервер сайты Telegram (по умолчанию пускаются, см. [Telegram](#telegram)) |
 | `--ip 203.0.113.10` | внешний IP, если сервер за NAT и IP не определился сам |
 | `--relay` | приёмник для работы через другой VPN (уже в команде выше); `--no-relay` - выключить |
 | `--check` | только проверить, что всё работает (см. ниже) |
@@ -236,25 +235,6 @@ chatgpt.com  openai.com  oaistatic.com  oaiusercontent.com
 ```
 
 После правки запустите ту же команду установки ещё раз, можно без параметров: она пересоберёт настройки и перезапустит контейнеры. Новые домены сайта можно найти в браузере: DevTools (F12) → Network → столбец Domain.
-
-### Telegram
-
-Сайты Telegram - отдельный список `/opt/proxygpt/sites-telegram.txt`, **включён по умолчанию**:
-
-```
-cdn-telegram.org  comments.app  contest.com  fragment.com  graph.org  quiz.directory  t.me
-tdesktop.com  telega.one  telegra.ph  telegram-cdn.org  telegram.dog  telegram.me  telegram.org
-telegram.space  telesco.pe  tg.dev  ton.org  tx.me  usercontent.dev
-```
-
-| Команда | Что делает |
-|---|---|
-| `INSTALL --no-telegram` | убрать Telegram: его сайты снова идут напрямую (список-файл остаётся) |
-| `INSTALL --telegram` | включить обратно |
-
-(`INSTALL` - начало команды установки, см. [Остановка и запуск](#остановка-и-запуск).) Выбор сохраняется при повторных установках; текущее состояние видно в `--status`.
-
-**Что именно пойдёт через сервер:** Telegram в браузере (`web.telegram.org`), ссылки `t.me`, `telegra.ph`, `fragment.com` и другие сайты Telegram. **Само приложение Telegram** (телефон, компьютер) так не пойдёт: оно подключается к своим серверам по IP-адресам и своему протоколу MTProto, а не по имени сайта, поэтому ни DNS, ни SNI-прокси его не касаются. Для приложения в настройках Telegram есть свой прокси (Настройки → Данные и память → Прокси).
 
 ## Насколько это скрыто от провайдера
 
