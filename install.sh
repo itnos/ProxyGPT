@@ -631,7 +631,11 @@ fi
 
 # iPhone, iPad, Mac: профиль DNS (DoH). PayloadScope=System обязателен для macOS 26: без него
 # установка падает с ошибкой «Не удалось создать службу VPN».
-cat <<'EOF' | fill > "$DIR/www/apple.mobileconfig"
+# SupplementalMatchDomains: у сервера спрашиваются только домены из sites.txt (и их поддомены), остальные -
+# у DNS сети, как без профиля. Иначе каждый новый адрес любого сайта ходит за границу и обратно, и YouTube
+# с его постоянно новыми именами видеосерверов тупит. Поменяли sites.txt - профиль на устройствах ставят заново.
+MATCH_DOMAINS="$(for d in "${SITES[@]}"; do printf '                    <string>%s</string>\n' "$d"; done)"
+cat <<'EOF' | fill | M="$MATCH_DOMAINS" awk '$1 == "__MATCH_DOMAINS__" { print ENVIRON["M"]; next } { print }' > "$DIR/www/apple.mobileconfig"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -652,6 +656,11 @@ cat <<'EOF' | fill > "$DIR/www/apple.mobileconfig"
                 <!-- не уходить на DNS сети, если этот сервер недоступен: Claude не пойдёт напрямую (iOS/macOS 26+) -->
                 <key>AllowFailover</key>
                 <false/>
+                <!-- через этот DNS - только сайты из списка сервера и их поддомены, остальное - через DNS сети -->
+                <key>SupplementalMatchDomains</key>
+                <array>
+__MATCH_DOMAINS__
+                </array>
             </dict>
             <key>PayloadDescription</key>
             <string>DNS __DOMAIN__: claude.ai, chatgpt.com and other listed sites go through your server</string>
@@ -894,10 +903,11 @@ cat <<'EOF' | fill > "$DIR/www/index.html"
   <li>«Разрешить» → Настройки → вверху «Профиль загружен» → Установить.</li>
   <li>Проверьте: Настройки → Основные → VPN и управление устройством → DNS → выбран «ProxyGPT DNS».</li>
 </ol>
+<p class="muted">Профиль спрашивает у сервера только сайты из списка, адреса остальных сайтов - у DNS вашей сети, как без профиля: YouTube и всё прочее работают как обычно. Если на сервере поменяли список сайтов, удалите профиль и установите заново. Профиль, скачанный до 27.11.2026, отправлял на сервер все запросы (из-за этого мог тупить YouTube) - переустановите его.</p>
 
 <h2>Mac</h2>
 <pre>curl -fsSL https://__DOMAIN__/__PAGE__/apple.mobileconfig -o ~/Downloads/proxygpt-dns.mobileconfig &amp;&amp; open ~/Downloads/proxygpt-dns.mobileconfig</pre>
-<p>Затем Системные настройки → Основные → Управление устройством (или поиск «Профили») → «ProxyGPT DNS» → Установить.</p>
+<p>Затем Системные настройки → Основные → Управление устройством (или поиск «Профили») → «ProxyGPT DNS» → Установить. Профиль тот же, что для iPhone: через сервер спрашиваются только сайты из списка.</p>
 
 <h2>Android 9 и новее</h2>
 <ol>
