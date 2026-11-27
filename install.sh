@@ -362,7 +362,11 @@ for d in claude.ai chatgpt.com; do
 done
 [ -n "$CHECK_ITEMS" ] || CHECK_ITEMS="  <li><a href=\"https://__SITE__/cdn-cgi/trace\">__SITE__/cdn-cgi/trace</a> - должно быть <code>ip=__IP__</code>: сайт идёт через сервер.</li>"
 
-fill() { sed -e "s|__PAGE__|$PG_PAGE_TOKEN|g" -e "s|__CHECK_ITEMS__|$CHECK_ITEMS|g" -e "s|__CHECK_CLI__|$CHECK_CLI|g" -e "s|__DOMAIN__|$DOMAIN|g" -e "s|__IP__|$IP|g" -e "s|__LOC__|${LOC:-??}|g" -e "s|__SITE__|$CHECK_SITE|g" -e "s|__UUID1__|$PG_UUID1|g" -e "s|__UUID2__|$PG_UUID2|g" -e "s|__RELAY_UUID__|${PG_RELAY_UUID:-}|g" -e "s|__RELAY_PATH__|${PG_RELAY_PATH:-}|g"; }
+# DNS stamp для dnscrypt-proxy на Windows 10: DoH на IP сервера, имя для TLS, путь; без привязки к сертификату
+stamp_lp() { printf "\\$(printf '%03o' "${#1}")%s" "$1"; }
+STAMP="sdns://$( { printf '\002\006\000\000\000\000\000\000\000'; stamp_lp "$IP"; printf '\000'; stamp_lp "$DOMAIN"; stamp_lp /dns-query; } | base64 | tr '+/' '-_' | tr -d '=\n')"
+
+fill() { sed -e "s|__PAGE__|$PG_PAGE_TOKEN|g" -e "s|__STAMP__|$STAMP|g" -e "s|__CHECK_ITEMS__|$CHECK_ITEMS|g" -e "s|__CHECK_CLI__|$CHECK_CLI|g" -e "s|__DOMAIN__|$DOMAIN|g" -e "s|__IP__|$IP|g" -e "s|__LOC__|${LOC:-??}|g" -e "s|__SITE__|$CHECK_SITE|g" -e "s|__UUID1__|$PG_UUID1|g" -e "s|__UUID2__|$PG_UUID2|g" -e "s|__RELAY_UUID__|${PG_RELAY_UUID:-}|g" -e "s|__RELAY_PATH__|${PG_RELAY_PATH:-}|g"; }
 
 # nginx: SNI-прокси на 443 (без расшифровки) + страница и DoH для имени DNS-сервера
 {
@@ -668,28 +672,184 @@ cat <<'EOF' | fill > "$DIR/www/apple.mobileconfig"
 </plist>
 EOF
 
-# Windows 11: DNS через DoH для всех активных сетевых подключений (PowerShell от администратора)
+# Windows 10 и 11 (PowerShell от администратора). В Windows 11 есть свой DoH; в Windows 10 его нет -
+# ставится служба dnscrypt-proxy (DoH-клиент) на 127.0.0.1:53. Результат проверяется, при ошибке всё возвращается.
 cat <<'EOF' | fill > "$DIR/www/windows.ps1"
-# ProxyGPT DNS for Windows 11. Run in PowerShell as Administrator:
+# ProxyGPT DNS for Windows 10 and 11. Run in PowerShell as Administrator:
 #   irm https://__DOMAIN__/__PAGE__/windows.ps1 | iex
-# Undo:
-#   Get-NetAdapter | % { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses }
-$ip  = '__IP__'
-$tpl = 'https://__DOMAIN__/dns-query'
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host 'Run PowerShell as Administrator' -ForegroundColor Red; return
+# Windows 11: built-in DNS over HTTPS (DoH) to __IP__.
+# Windows 10 has no built-in DoH: installs the open-source dnscrypt-proxy service
+#   (github.com/DNSCrypt/dnscrypt-proxy) into "C:\Program Files\ProxyGPT" and sets DNS to 127.0.0.1.
+# The result is checked; if the check fails, everything is put back.
+# Undo (works without internet), PowerShell as Administrator:
+#   Get-NetAdapter | ForEach-Object { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses }
+#   $e = "$env:ProgramFiles\ProxyGPT\dnscrypt-proxy.exe"; if (Test-Path $e) { & $e -service stop; & $e -service uninstall; Start-Sleep 2; Remove-Item -Recurse -Force (Split-Path $e) }
+#   Clear-DnsClientCache
+& {
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$ip    = '__IP__'
+$doh   = 'https://__DOMAIN__/dns-query'
+$stamp = '__STAMP__'
+$site  = '__SITE__'
+$dir   = Join-Path $env:ProgramFiles 'ProxyGPT'
+$exe   = Join-Path $dir 'dnscrypt-proxy.exe'
+$conf  = Join-Path $dir 'dnscrypt-proxy.toml'
+$log   = Join-Path $dir 'dnscrypt-proxy.log'
+
+function Say([string]$t, [string]$c = 'Gray') { Write-Host $t -ForegroundColor $c }
+
+# DNS on every network adapter, also on the ones not connected now
+function Set-Dns([string[]]$servers) {
+    foreach ($a in Get-NetAdapter) {
+        try { Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses $servers; Say ('DNS set: ' + $a.Name) }
+        catch {
+            $v4 = @($servers | Where-Object { $_ -notlike '*:*' })
+            if ($v4.Count -lt $servers.Count) {
+                try { Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ServerAddresses $v4; Say ('DNS set (IPv4): ' + $a.Name) } catch {}
+            }
+        }
+    }
+    Clear-DnsClientCache
 }
-if (Get-DnsClientDohServerAddress -ServerAddress $ip -ErrorAction SilentlyContinue) {
-    Set-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $tpl -AllowFallbackToUdp $false -AutoUpgrade $true | Out-Null
-} else {
-    Add-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $tpl -AllowFallbackToUdp $false -AutoUpgrade $true | Out-Null
+function Reset-Dns {
+    foreach ($a in Get-NetAdapter) { try { Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ResetServerAddresses } catch {} }
+    Clear-DnsClientCache
 }
-Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object {
-    Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses $ip
-    Write-Host ('DNS set: ' + $_.Name)
+# __SITE__ must resolve to the server, an ordinary site must resolve too
+function Test-Dns([string]$server) {
+    $p = @{ Type = 'A'; DnsOnly = $true; QuickTimeout = $true }
+    if ($server) { $p.Server = $server }
+    for ($i = 0; $i -lt 10; $i++) {
+        try {
+            $a = @(Resolve-DnsName $site @p | Where-Object Type -eq 'A' | ForEach-Object IPAddress)
+            $b = @(Resolve-DnsName 'example.com' @p | Where-Object Type -eq 'A')
+            if (($a -contains $ip) -and $b.Count) { return $true }
+        } catch {}
+        Start-Sleep 2
+        Clear-DnsClientCache
+    }
+    return $false
 }
-Clear-DnsClientCache
-Write-Host ('Done. DNS = ' + $ip + ' over HTTPS (' + $tpl + ')') -ForegroundColor Green
+function Remove-Svc {
+    Stop-Service dnscrypt-proxy -Force -ErrorAction SilentlyContinue
+    if (Get-Service dnscrypt-proxy -ErrorAction SilentlyContinue) { sc.exe delete dnscrypt-proxy | Out-Null }
+    Start-Sleep 2
+}
+
+$admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $admin) { Say 'Run PowerShell as Administrator: right click Start -> Windows PowerShell (Admin) or Terminal (Admin).' Red; return }
+
+$build = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
+
+# ---- Windows 11: built-in DoH ----
+if (($build -ge 20348) -and (Get-Command Add-DnsClientDohServerAddress -ErrorAction SilentlyContinue)) {
+    Say "Windows build ${build}: built-in DNS over HTTPS"
+    if (Get-DnsClientDohServerAddress -ServerAddress $ip -ErrorAction SilentlyContinue) {
+        Set-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $doh -AllowFallbackToUdp $false -AutoUpgrade $true | Out-Null
+    } else {
+        Add-DnsClientDohServerAddress -ServerAddress $ip -DohTemplate $doh -AllowFallbackToUdp $false -AutoUpgrade $true | Out-Null
+    }
+    Set-Dns @($ip)
+    if (-not (Test-Dns)) {
+        Reset-Dns
+        Say 'Check failed: DNS is back to automatic, nothing changed. Turn off VPN and try again, or use the browser setting from the page.' Red
+        return
+    }
+    Say "Done. DNS = $ip over HTTPS ($doh)" Green
+    return
+}
+
+# ---- Windows 10: dnscrypt-proxy service ----
+Say "Windows build ${build}: no built-in DNS over HTTPS, installing the dnscrypt-proxy service"
+$svc = Get-CimInstance Win32_Service -Filter "Name='dnscrypt-proxy'"
+if ($svc -and ($svc.PathName -notlike "*$dir*")) {
+    Say ('Another dnscrypt-proxy service is already installed: ' + $svc.PathName) Red
+    Say 'Nothing changed. Remove it first, or use the browser setting from the page.' Red
+    return
+}
+$tmp = Join-Path $env:TEMP ('proxygpt-' + [guid]::NewGuid().ToString('N'))
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $arch = 'win32'
+    if ([Environment]::Is64BitOperatingSystem -and $env:PROCESSOR_ARCHITECTURE -ne 'ARM64' -and $env:PROCESSOR_ARCHITEW6432 -ne 'ARM64') { $arch = 'win64' }
+    $rel = Invoke-RestMethod 'https://api.github.com/repos/DNSCrypt/dnscrypt-proxy/releases/latest' -UserAgent 'ProxyGPT' -UseBasicParsing
+    $asset = $rel.assets | Where-Object { $_.name -match "^dnscrypt-proxy-$arch-[0-9.]+\.zip$" } | Select-Object -First 1
+    if (-not $asset) { throw "no $arch build in release $($rel.tag_name)" }
+    New-Item -ItemType Directory $tmp | Out-Null
+    $zip = Join-Path $tmp $asset.name
+    Say ('Downloading ' + $asset.browser_download_url)
+    Invoke-WebRequest $asset.browser_download_url -OutFile $zip -UseBasicParsing
+    if (("$($asset.digest)" -match '^sha256:([0-9a-f]{64})$') -and ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $Matches[1])) { throw 'checksum mismatch' }
+    Expand-Archive $zip -DestinationPath $tmp -Force
+    $new = Get-ChildItem $tmp -Recurse -Filter 'dnscrypt-proxy.exe' | Select-Object -First 1
+    if (-not $new) { throw 'dnscrypt-proxy.exe is not in the archive' }
+} catch {
+    Say ('Download failed, nothing changed: ' + $_.Exception.Message) Red
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    return
+}
+
+$switched = $false
+try {
+    if ($svc) { Remove-Svc }
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    Copy-Item $new.FullName $exe -Force
+    Get-ChildItem $tmp -Recurse -Filter 'LICENSE' | Select-Object -First 1 | Copy-Item -Destination (Join-Path $dir 'LICENSE') -Force
+    $toml = @"
+# ProxyGPT: DNS over HTTPS to __DOMAIN__ (__IP__), made by windows.ps1
+listen_addresses = ['127.0.0.1:53', '[::1]:53']
+server_names = ['proxygpt']
+ipv4_servers = true
+ipv6_servers = false
+dnscrypt_servers = true
+doh_servers = true
+require_dnssec = false
+require_nolog = false
+require_nofilter = false
+ignore_system_dns = true
+netprobe_address = '__IP__:443'
+netprobe_timeout = 60
+timeout = 5000
+keepalive = 30
+cache = true
+cache_min_ttl = 60
+cache_max_ttl = 600
+cache_neg_min_ttl = 10
+cache_neg_max_ttl = 60
+log_level = 2
+log_file = '$log'
+log_files_max_size = 2
+
+[static]
+  [static.'proxygpt']
+  stamp = '$stamp'
+"@
+    [IO.File]::WriteAllText($conf, $toml, (New-Object Text.ASCIIEncoding))
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    & $exe -config $conf -service install 2>&1 | Out-Null
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $eap
+    if ($code) { throw "service install failed (code $code)" }
+    sc.exe failure dnscrypt-proxy reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null
+    Start-Service dnscrypt-proxy
+    if (-not (Test-Dns '127.0.0.1')) { throw 'dnscrypt-proxy does not answer on 127.0.0.1' }
+    $switched = $true
+    Set-Dns @('127.0.0.1', '::1')
+    if (-not (Test-Dns)) { throw 'Windows does not use the new DNS (is a VPN on?)' }
+} catch {
+    Say ('Check failed: ' + $_.Exception.Message) Red
+    if (Test-Path $log) { Get-Content $log -Tail 5 | ForEach-Object { Say ('  ' + $_) } }
+    if ($switched -or $svc) { Reset-Dns; Say 'DNS is back to automatic.' Yellow }
+    Remove-Svc
+    Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+    Say 'dnscrypt-proxy removed. Turn off VPN and try again, or use the browser setting from the page.' Yellow
+    return
+} finally {
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+}
+Say "Done. DNS = 127.0.0.1 (dnscrypt-proxy service) -> $doh" Green
+}
 EOF
 
 # Страница с инструкцией
@@ -732,10 +892,25 @@ cat <<'EOF' | fill > "$DIR/www/index.html"
   <li>«Имя хоста поставщика частного DNS»: <pre>__DOMAIN__</pre></li>
 </ol>
 
-<h2>Windows 11</h2>
-<p>PowerShell <b>от имени администратора</b>:</p>
-<pre>irm https://__DOMAIN__/__PAGE__/windows.ps1 | iex</pre>
-<p class="muted">Вернуть как было: <code>Get-NetAdapter | % { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses }</code></p>
+<h2>Windows 10 и 11</h2>
+<ol>
+  <li>Нажмите <b>правой кнопкой на «Пуск»</b> → «Windows PowerShell (администратор)» (в Windows 11 - «Терминал (администратор)») → «Да».</li>
+  <li>Вставьте команду (правой кнопкой мыши в окне) и нажмите Enter: <pre>irm https://__DOMAIN__/__PAGE__/windows.ps1 | iex</pre></li>
+  <li>Дождитесь зелёной надписи <b>Done</b>. Красная <b>Check failed</b> - не получилось, и скрипт уже вернул всё как было.</li>
+</ol>
+<p class="muted">Windows 11 умеет шифровать DNS сама, скрипт только включает это. В Windows 10 такого нет, поэтому скрипт ставит небольшую открытую программу <a href="https://github.com/DNSCrypt/dnscrypt-proxy">dnscrypt-proxy</a> (служба в C:\Program Files\ProxyGPT, скачивается с GitHub, контрольная сумма проверяется), и Windows ходит за DNS через неё.</p>
+
+<h3>Вернуть как было</h3>
+<p>Работает и без интернета. Откройте PowerShell от имени администратора (как в шаге 1), вставьте <b>все три строки сразу</b> и нажмите Enter:</p>
+<pre>Get-NetAdapter | ForEach-Object { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses }
+$e = "$env:ProgramFiles\ProxyGPT\dnscrypt-proxy.exe"; if (Test-Path $e) { &amp; $e -service stop; &amp; $e -service uninstall; Start-Sleep 2; Remove-Item -Recurse -Force (Split-Path $e) }
+Clear-DnsClientCache</pre>
+<p class="muted">DNS снова станет автоматическим (от роутера или провайдера), служба dnscrypt-proxy удалится, если она была.</p>
+
+<h3>Только браузер, без изменений в Windows</h3>
+<p>Если ставить ничего не хочется: работает в браузере, но не в приложениях Claude и ChatGPT. В настройках браузера найдите «Безопасный DNS» (в Firefox - «DNS через HTTPS», режим «Максимальная защита»), выберите своего (другого) поставщика и вставьте адрес:</p>
+<pre>https://__DOMAIN__/dns-query</pre>
+<p class="muted">Chrome: Настройки → Конфиденциальность и безопасность → Безопасность. Edge: Настройки → Конфиденциальность, поиск и службы → Безопасность. Firefox: Настройки → Приватность и защита.</p>
 
 <h2>Linux (systemd-resolved)</h2>
 <pre>sudo mkdir -p /etc/systemd/resolved.conf.d &amp;&amp; printf '[Resolve]\nDNS=__IP__#__DOMAIN__\nDNSOverTLS=yes\n' | sudo tee /etc/systemd/resolved.conf.d/proxygpt.conf &amp;&amp; sudo systemctl restart systemd-resolved</pre>
@@ -757,7 +932,7 @@ __CHECK_CLI__</pre>
 <h2>Если не работает</h2>
 <ul>
   <li>iPhone и Mac: выключите «Частный узел iCloud» (Private Relay) - он обходит DNS в Safari.</li>
-  <li>Chrome: Настройки → Конфиденциальность → «Безопасный DNS» - «Использовать текущего поставщика».</li>
+  <li>Chrome, Edge: «Безопасный DNS» - «Использовать текущего поставщика» или адрес https://__DOMAIN__/dns-query (см. «Только браузер»).</li>
   <li>Включённый VPN подменяет DNS: на время выключите его.</li>
   <li>После настройки закройте и откройте браузер или приложение заново.</li>
 </ul>
@@ -789,7 +964,7 @@ $( [ $ok = 1 ] && printf '\033[1;32mГотово.\033[0m' || printf '\033[1;33m�
 
   iPhone, iPad, Mac:  https://$DOMAIN/$PG_PAGE_TOKEN/apple.mobileconfig  (профиль DNS)
   Android:            Частный DNS -> $DOMAIN
-  Windows 11:         irm https://$DOMAIN/$PG_PAGE_TOKEN/windows.ps1 | iex   (PowerShell от администратора)
+  Windows 10, 11:     irm https://$DOMAIN/$PG_PAGE_TOKEN/windows.ps1 | iex   (PowerShell от администратора)
 
 Сайты: ${SITES[*]}$( [ "$PROXY" = 1 ] || printf '  (прокси ВЫКЛЮЧЕН - идут напрямую; включить: --start proxy)' )
 Правка списка: $DIR/sites.txt, затем запустить установку ещё раз.
