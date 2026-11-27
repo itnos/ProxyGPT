@@ -14,7 +14,19 @@ set -Eeuo pipefail
 DIR=/opt/proxygpt
 RAW="${PROXYGPT_RAW:-https://raw.githubusercontent.com/itnos/ProxyGPT/main}"
 DOMAIN="" IP="" EMAIL="" SITES_ARG="" AGREE=0 UNINSTALL=0 CHECK=0 RELAY="" STOP="" START="" STATUS=0 PROXY=""
-DEFAULT_SITES="claude.ai claude.com anthropic.com claudeusercontent.com chatgpt.com openai.com oaistatic.com oaiusercontent.com"
+# Список по умолчанию (так он и ложится в sites.txt): Claude, ChatGPT и сторонние адреса их страниц,
+# которые иначе видели бы настоящий IP (найдены по коду и CSP claude.ai и chatgpt.com 27.11.2026)
+DEFAULT_SITES='# Claude и ChatGPT
+claude.ai claude.com anthropic.com claudeusercontent.com
+chatgpt.com openai.com oaistatic.com oaiusercontent.com
+# другие домены Anthropic и OpenAI: приложения MCP, опубликованные страницы, настройки ChatGPT
+claudemcpcontent.com claude.site chatgpt.site oaistatsig.com
+# проверки «вы не робот» при входе (они же стоят на многих других сайтах)
+hcaptcha.com challenges.cloudflare.com
+# телеметрия страниц: ошибки, статистика, флаги функций
+browser-intake-datadoghq.com browser-intake-us5-datadoghq.com sentry.io statsigapi.net featuregates.org growthbook.io
+# чат поддержки Claude и оплата (Stripe - на всех сайтах, где через него платят)
+intercom.io intercomcdn.com stripe.com stripe.network stripecdn.com'
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
@@ -29,7 +41,7 @@ ProxyGPT - SNI-прокси и свой DNS, чтобы claude.ai и chatgpt.com
   --agree-tos                согласие с условиями Let's Encrypt (нужно при первом выпуске сертификата)
   --email you@example.com    почта для писем Let's Encrypt (необязательно)
   --ip 203.0.113.10          внешний IP сервера, если не определился сам
-  --sites "a.com b.com"      какие сайты пускать (по умолчанию Claude и ChatGPT); иначе правьте /opt/proxygpt/sites.txt
+  --sites "a.com b.com"      какие сайты пускать (по умолчанию Claude, ChatGPT и их сторонние адреса); иначе правьте /opt/proxygpt/sites.txt
   --dir /opt/proxygpt        куда ставить
   --relay                    включить приёмник для цепочки «другой VPN -> этот сервер -> сайт» (см. README)
   --no-relay                 выключить приёмник
@@ -281,9 +293,10 @@ RESOLVED="$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR == 1 { print $1 }')"
 mkdir -p "$DIR/conf" "$DIR/www"
 if [ -n "$SITES_ARG" ] || [ ! -f "$DIR/sites.txt" ]; then
   {
-    echo "# Сайты, которые идут через этот сервер: по одному корневому домену в строке, поддомены входят сами."
+    echo "# Сайты, которые идут через этот сервер: домены через пробел или по одному в строке, поддомены входят сами."
     echo "# После правки запустите установку ещё раз (ту же команду, можно без параметров)."
-    for d in ${SITES_ARG:-$DEFAULT_SITES}; do echo "$d"; done
+    if [ -n "$SITES_ARG" ]; then for d in $SITES_ARG; do echo "$d"; done
+    else printf '%s\n' "$DEFAULT_SITES"; fi
   } > "$DIR/sites.txt"
 fi
 read_sites

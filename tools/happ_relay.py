@@ -30,8 +30,14 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# как в install.sh: Claude, ChatGPT и сторонние адреса их страниц
 DEFAULT_SITES = ["claude.ai", "claude.com", "anthropic.com", "claudeusercontent.com",
-                 "chatgpt.com", "openai.com", "oaistatic.com", "oaiusercontent.com"]
+                 "chatgpt.com", "openai.com", "oaistatic.com", "oaiusercontent.com",
+                 "claudemcpcontent.com", "claude.site", "chatgpt.site", "oaistatsig.com",
+                 "hcaptcha.com", "challenges.cloudflare.com",
+                 "browser-intake-datadoghq.com", "browser-intake-us5-datadoghq.com", "sentry.io",
+                 "statsigapi.net", "featuregates.org", "growthbook.io",
+                 "intercom.io", "intercomcdn.com", "stripe.com", "stripe.network", "stripecdn.com"]
 PASS_HEADERS = ("subscription-userinfo", "support-url", "profile-web-page-url")
 
 

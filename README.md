@@ -245,14 +245,27 @@ python3 tools/happ_relay.py --sub "https://ссылка-подписки-ваш�
 
 ## Список сайтов
 
-Список лежит в `/opt/proxygpt/sites.txt`: один корневой домен в строке, поддомены входят сами. По умолчанию в нём:
+Список лежит в `/opt/proxygpt/sites.txt`: домены через пробел или по одному в строке, поддомены входят сами (`stripe.com` - это и `js.stripe.com`, и `api.stripe.com`). Можно указать и один поддомен: `challenges.cloudflare.com` пускает через сервер только его, а остальной `cloudflare.com` идёт напрямую. По умолчанию в списке:
 
-```
-claude.ai  claude.com  anthropic.com  claudeusercontent.com
-chatgpt.com  openai.com  oaistatic.com  oaiusercontent.com
-```
+| Группа | Домены | Зачем |
+|---|---|---|
+| Claude и ChatGPT | `claude.ai` `claude.com` `anthropic.com` `claudeusercontent.com` `chatgpt.com` `openai.com` `oaistatic.com` `oaiusercontent.com` | сами сайты, их файлы и API |
+| Другие домены Anthropic и OpenAI | `claudemcpcontent.com` `claude.site` `chatgpt.site` `oaistatsig.com` | приложения MCP в Claude, опубликованные страницы, настройки ChatGPT |
+| Проверки «вы не робот» | `hcaptcha.com` `challenges.cloudflare.com` | капча при входе в Claude и ChatGPT; без них сервис капчи видит ваш IP, а сайт - IP сервера |
+| Телеметрия | `browser-intake-datadoghq.com` `browser-intake-us5-datadoghq.com` `sentry.io` `statsigapi.net` `featuregates.org` `growthbook.io` | ошибки, статистика и флаги функций: туда уходит и ваш IP |
+| Поддержка и оплата | `intercom.io` `intercomcdn.com` `stripe.com` `stripe.network` `stripecdn.com` | чат поддержки Claude (оператор видит город по IP) и оплата картой |
+
+Сторонние домены найдены 27.11.2026 по коду страниц claude.ai и chatgpt.com и их политике безопасности (CSP): без них страницы Claude и ChatGPT обращались к этим адресам напрямую, с вашим настоящим IP. Капча, Stripe, Intercom, Datadog и Sentry стоят и на тысячах других сайтов, поэтому на любом сайте, где они есть, эти части тоже пойдут через сервер: например, оплата через Stripe где угодно будет с IP сервера, а капча может спрашиваться чаще. Не нужно - уберите строку.
 
 После правки запустите ту же команду установки ещё раз, можно без параметров: она пересоберёт настройки и перезапустит контейнеры. Новые домены сайта можно найти в браузере: DevTools (F12) → Network → столбец Domain.
+
+**Сервер ставили до 27.11.2026?** Повторная установка ваш `sites.txt` не трогает, и новых доменов в нём не будет. Взять новый список по умолчанию (ваши правки списка пропадут):
+
+```bash
+rm /opt/proxygpt/sites.txt
+```
+
+затем запустить установку ещё раз. Или вписать нужные домены в `sites.txt` руками.
 
 ## Насколько это скрыто от провайдера
 
